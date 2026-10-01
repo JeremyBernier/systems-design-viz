@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { MAX_WEB, fmtRate, fmtBits, fmtGB, rawMetric } from './sim.js';
+import { MAX_WEB, NODE_INFO, fmtRate, fmtBits, fmtGB, rawMetric } from './sim.js';
+import { logoSVG, logoCanvas } from './tech.js';
 
 // Categorical flow colours (one per kind of traffic) and reserved status colours.
 export const FLOW = {
@@ -10,6 +11,7 @@ export const FLOW = {
   event: 0x9085e9,
   job: 0xc98500,
   query: 0xd55181,
+  response: 0xb7d3f6,
   error: 0xe66767,
 };
 export const STATUS = { good: 0x0ca30c, warning: 0xfab219, serious: 0xec835a, critical: 0xd03b3b, down: 0x55554f };
@@ -23,8 +25,14 @@ export function loadLevel(util, down) {
 }
 
 const HEIGHT = { client: 2.2, lb: 1.2, web: 2.3, cache: 1.2, db: 2.1, kafka: 1.5, consumer: 1.6, queue: 1.1, worker: 1.4, lake: 1.6, clickhouse: 2.1, trino: 1.9, bi: 2.0 };
-const OVERVIEW = { pos: new THREE.Vector3(5, 32, 27), target: new THREE.Vector3(5, 0, 2.5) };
+const OVERVIEW = { pos: new THREE.Vector3(6.5, 36, 27), target: new THREE.Vector3(6.5, 0, 4) };
 const SIDE_PANELS = 620; // px of the window covered by the two side panels
+
+const LANES = [
+  { key: '', rev: false },
+  { key: '<', rev: true, color: new THREE.Color(FLOW.response) },
+  { key: '!', rev: true, color: new THREE.Color(FLOW.error) },
+];
 
 const tmpV = new THREE.Vector3();
 const tmpM = new THREE.Matrix4();
@@ -33,7 +41,13 @@ const tmpS = new THREE.Vector3();
 const tmpC = new THREE.Color();
 
 export class Scene {
-  constructor(container, sim, { onSelect }) {
+  constructor(container, sim, { onSelect, onPlace, onConnect }) {
+    this.onPlace = onPlace;
+    this.onConnect = onConnect;
+    this.placing = null; // id of the component being placed
+    this.connecting = false;
+    this.connectFrom = null;
+    this.cursor = null; // pointer position on the floor
     this.sim = sim;
     this.container = container;
     this.onSelect = onSelect;
@@ -81,6 +95,17 @@ export class Scene {
     this._buildRig();
     this._bindPointer();
 
+    // build-mode helpers: a ghost pad while placing, a rubber band while connecting
+    this.ghost = new THREE.Mesh(new THREE.TorusGeometry(1.9, 0.06, 8, 64), new THREE.MeshBasicMaterial({ color: 0x3987e5, toneMapped: false }));
+    this.ghost.rotation.x = Math.PI / 2;
+    this.ghost.position.y = 0.1;
+    this.ghost.visible = false;
+    scene.add(this.ghost);
+    this.band = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), new THREE.LineBasicMaterial({ color: 0xffffff }));
+    this.band.frustumCulled = false;
+    this.band.visible = false;
+    scene.add(this.band);
+
     this.flash = new THREE.PointLight(0xffa040, 0, 30);
     scene.add(this.flash);
 
@@ -95,16 +120,16 @@ export class Scene {
     const fixed = {
       client: [-12, 0],
       lb: [-7, 0],
-      cache: [4, -6.5],
-      db: [10, -3.5],
+      cache: [4, -8.5],
+      db: [10, -5],
       queue: [4, 2],
       worker: [10, 2.5],
-      kafka: [4, 9.5],
-      consumer: [10, 8],
-      lake: [16, 8],
-      trino: [22, 8],
-      clickhouse: [10, 13.5],
-      bi: [16, 13.5],
+      kafka: [4, 11],
+      consumer: [10, 9.5],
+      lake: [16, 9.5],
+      trino: [22, 9.5],
+      clickhouse: [10, 16.5],
+      bi: [16, 16.5],
     };
     for (const id in this.sim.nodes) {
       const type = this.sim.nodes[id].type;
@@ -218,31 +243,66 @@ export class Scene {
       this.hitMeshes.push(hit);
 
       if (fixed[id]) v.target.set(fixed[id][0], 0, fixed[id][1]);
-      else v.target.set(-2, 0, 0);
+      else v.target.set(-1.5, 0, 0);
+      v.home = v.target.clone();
       group.position.copy(v.target);
 
       const el = document.createElement('div');
       el.className = 'node-label';
-      el.innerHTML = '<div class="nl-name"></div><div class="nl-stat"></div><div class="nl-bar"><i></i></div><div class="nl-data"></div>';
+      el.innerHTML = '<div class="nl-name"></div><div class="nl-role"></div><div class="nl-stat"></div><div class="nl-bar"><i></i></div><div class="nl-data"></div>';
       this.labelLayer.appendChild(el);
       v.el = el;
       v.elName = el.children[0];
-      v.elStat = el.children[1];
-      v.elBar = el.children[2].firstChild;
-      v.elData = el.children[3];
+      v.elRole = el.children[1];
+      v.elStat = el.children[2];
+      v.elBar = el.children[3].firstChild;
+      v.elData = el.children[4];
+
+      // technology logo, lying on the pad in front of the machine
+      v.decal = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 1.0), new THREE.MeshBasicMaterial({ transparent: true, toneMapped: false }));
+      v.decal.rotation.x = -Math.PI / 2;
+      v.decal.position.set(0, 0.095, 1.3);
+      v.decal.visible = false;
+      group.add(v.decal);
 
       this.scene.add(group);
       this.nodes[id] = v;
     }
   }
 
+  // Web servers the user has not placed by hand line up in a column.
   _layoutWebs() {
-    const n = this.sim.params.webCount;
-    for (let i = 0; i < MAX_WEB; i++) {
-      const v = this.nodes['web' + i];
-      const idx = Math.min(i, n - 1);
-      v.target.set(-1.5, 0, (idx - (n - 1) / 2) * 3.9);
+    const auto = this.sim.webs.filter((w) => w.active && !this.nodes[w.id].manual);
+    auto.forEach((w, i) => this.nodes[w.id].target.set(-1.5, 0, (i - (auto.length - 1) / 2) * 4.4));
+  }
+
+  resetLayout() {
+    for (const id in this.nodes) {
+      const v = this.nodes[id];
+      v.manual = false;
+      v.target.copy(v.home);
     }
+    this._layoutWebs();
+    for (const id in this.nodes) this.nodes[id].group.position.copy(this.nodes[id].target);
+  }
+
+  // Put a component at a spot the user chose.
+  placeAt(id, pt) {
+    const v = this.nodes[id];
+    v.manual = true;
+    v.target.set(pt.x, 0, pt.z);
+    v.group.position.copy(v.target);
+  }
+
+  startPlacing(id) {
+    this.placing = id;
+    this.setConnecting(false);
+  }
+
+  setConnecting(on) {
+    this.connecting = on;
+    this.connectFrom = null;
+    if (on) this.placing = null;
   }
 
   // ------------------------------------------------------------ links
@@ -254,7 +314,7 @@ export class Scene {
       const line = new THREE.Line(geo, mat);
       line.frustumCulled = false;
       this.scene.add(line);
-      this.links.push({ id: `${from}>${to}`, from: this.nodes[from], to: this.nodes[to], color: new THREE.Color(color), line, acc: 0 });
+      this.links.push({ id: `${from}>${to}`, from: this.nodes[from], to: this.nodes[to], color: new THREE.Color(color), line, acc: {} });
     };
     add('client', 'lb', FLOW.request);
     for (let i = 0; i < MAX_WEB; i++) {
@@ -278,7 +338,7 @@ export class Scene {
   // ------------------------------------------------------------ particles
   _buildParticles() {
     // traffic dots travelling along links
-    const MAXP = (this.MAXP = 4000);
+    const MAXP = (this.MAXP = 7000);
     const mat = new THREE.MeshBasicMaterial({ toneMapped: false, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false });
     this.pMesh = new THREE.InstancedMesh(new THREE.SphereGeometry(0.085, 8, 6), mat, MAXP);
     this.pMesh.frustumCulled = false;
@@ -423,23 +483,71 @@ export class Scene {
     const dom = this.renderer.domElement;
     const ray = new THREE.Raycaster();
     const ndc = new THREE.Vector2();
-    const pick = (e) => {
+    const ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const aim = (e) => {
       const r = dom.getBoundingClientRect();
       ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
       ray.setFromCamera(ndc, this.camera);
+    };
+    const pick = (e) => {
+      aim(e);
       const hit = ray.intersectObjects(this.hitMeshes.filter((m) => m.parent.visible))[0];
       return hit ? hit.object.userData.id : null;
     };
+    const groundAt = (e) => {
+      aim(e);
+      return ray.ray.intersectPlane(ground, new THREE.Vector3());
+    };
+    const moved = (e, d) => Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5;
+
     let down = null;
-    dom.addEventListener('pointerdown', (e) => (down = [e.clientX, e.clientY]));
-    dom.addEventListener('pointerup', (e) => {
-      if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 5) return;
+    dom.addEventListener(
+      'pointerdown',
+      (e) => {
+        const id = this.placing ? null : pick(e);
+        down = { x: e.clientX, y: e.clientY, id, dragging: false };
+        // grabbing a component must not also orbit the camera
+        if (id && !this.connecting) this.controls.enabled = false;
+      },
+      true
+    );
+    addEventListener('pointerup', (e) => {
+      this.controls.enabled = true;
+      const d = down;
+      down = null;
+      if (!d || d.dragging || e.target !== dom || moved(e, d)) return;
+      if (this.placing) {
+        const pt = groundAt(e);
+        if (pt) this.onPlace(this.placing, pt);
+        return;
+      }
       const id = pick(e);
+      if (this.connecting) {
+        if (!id) this.connectFrom = null;
+        else if (!this.connectFrom) this.connectFrom = id;
+        else {
+          if (id !== this.connectFrom) this.onConnect(this.connectFrom, id);
+          this.connectFrom = null;
+        }
+        return;
+      }
       if (id) this.onSelect(id);
     });
     dom.addEventListener('pointermove', (e) => {
-      this.hoverId = pick(e);
-      dom.style.cursor = this.hoverId ? 'pointer' : '';
+      this.cursor = groundAt(e);
+      if (down && down.id && !this.connecting && (down.dragging || moved(e, down))) {
+        // drag a component across the floor
+        down.dragging = true;
+        const v = this.nodes[down.id];
+        if (this.cursor) {
+          v.manual = true;
+          v.target.set(THREE.MathUtils.clamp(this.cursor.x, -45, 45), 0, THREE.MathUtils.clamp(this.cursor.z, -45, 45));
+        }
+        dom.style.cursor = 'grabbing';
+        return;
+      }
+      this.hoverId = this.placing ? null : pick(e);
+      dom.style.cursor = this.placing ? 'crosshair' : this.hoverId ? (this.connecting ? 'cell' : 'grab') : '';
     });
   }
 
@@ -466,7 +574,7 @@ export class Scene {
     this.camera.updateProjectionMatrix();
     // pull the overview camera back until the diagram fits between the side panels
     const free = Math.max(300, w - SIDE_PANELS) / h;
-    const fit = Math.max(0.9, 1.17 / free);
+    const fit = Math.max(0.95, 1.3 / free);
     this.fit = fit;
     if (!this.focusId) this.camera.position.copy(this._overviewPos());
   }
@@ -500,7 +608,8 @@ export class Scene {
     for (const id in this.nodes) {
       const v = this.nodes[id];
       const n = sim.nodes[id];
-      v.group.visible = n.active || n.type === 'cache';
+      v.group.visible = n.active;
+      if (!n.active && n.type === 'web') v.manual = false;
       v.el.hidden = !v.group.visible;
       if (!v.group.visible) {
         v.group.position.copy(v.target);
@@ -547,10 +656,24 @@ export class Scene {
       }
     }
 
+    this.ghost.visible = !!(this.placing && this.cursor);
+    if (this.ghost.visible) this.ghost.position.set(this.cursor.x, 0.1, this.cursor.z);
+    const from = this.connecting && this.connectFrom && this.nodes[this.connectFrom];
+    this.band.visible = !!(from && this.cursor);
+    if (this.band.visible) {
+      const hov = this.hoverId && this.hoverId !== this.connectFrom ? this.nodes[this.hoverId].group.position : this.cursor;
+      const bp = this.band.geometry.attributes.position;
+      bp.setXYZ(0, from.group.position.x, 0.5, from.group.position.z);
+      bp.setXYZ(1, hov.x, 0.5, hov.z);
+      bp.needsUpdate = true;
+      const ok = hov !== this.cursor && sim.canConnect(this.connectFrom, this.hoverId);
+      this.band.material.color.set(hov === this.cursor ? 0xc3c2b7 : ok ? STATUS.good : STATUS.critical);
+    }
+
     // links + traffic particles
     for (const L of this.links) {
       const rate = sim.flows[L.id] || 0;
-      const show = L.from.group.visible && L.to.group.visible;
+      const show = L.from.group.visible && L.to.group.visible && sim.edges.has(L.id);
       L.line.visible = show;
       if (!show) continue;
       const a = L.from.group.position;
@@ -561,11 +684,24 @@ export class Scene {
       pos.needsUpdate = true;
       L.line.material.opacity = rate > 0.5 ? 0.18 + Math.min(0.5, Math.sqrt(rate) / 160) : 0.06;
       // dot density grows with √rate so both 50 req/s and 20k req/s read clearly
-      L.acc += simDt * Math.min(95, 0.9 * Math.sqrt(rate));
-      while (L.acc >= 1) {
-        L.acc -= 1;
-        if (this.parts.length < this.MAXP)
-          this.parts.push({ L, t: 0, speed: (7.5 + Math.random() * 2) / a.distanceTo(b), off: (Math.random() - 0.5) * 0.3, lift: 0.5 + Math.random() * 0.3 });
+      // Requests travel out in one lane; responses ('<') and errors ('!') come back in the other.
+      const len = a.distanceTo(b);
+      for (const lane of LANES) {
+        const r = lane.key ? sim.flows[L.id + lane.key] || 0 : rate;
+        L.acc[lane.key] = (L.acc[lane.key] || 0) + simDt * Math.min(95, 0.9 * Math.sqrt(r));
+        while (L.acc[lane.key] >= 1) {
+          L.acc[lane.key] -= 1;
+          if (this.parts.length < this.MAXP)
+            this.parts.push({
+              L,
+              t: 0,
+              rev: lane.rev,
+              color: lane.color || L.color,
+              speed: (7.5 + Math.random() * 2) / len,
+              off: (lane.rev ? -0.2 : 0.2) + (Math.random() - 0.5) * 0.2,
+              lift: 0.5 + Math.random() * 0.3,
+            });
+        }
       }
     }
     let i = 0;
@@ -583,10 +719,14 @@ export class Scene {
       const b = p.L.to.group.position;
       const hA = HEIGHT[p.L.from.type] * 0.45;
       const hB = HEIGHT[p.L.to.type] * 0.45;
-      tmpV.set(a.x + (b.x - a.x) * p.t, hA + (hB - hA) * p.t + Math.sin(p.t * Math.PI) * p.lift, a.z + (b.z - a.z) * p.t + p.off);
+      const u = p.rev ? 1 - p.t : p.t;
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const k = p.off / (Math.hypot(dx, dz) || 1); // sideways lane offset
+      tmpV.set(a.x + dx * u + dz * k, hA + (hB - hA) * u + Math.sin(u * Math.PI) * p.lift, a.z + dz * u - dx * k);
       tmpM.makeTranslation(tmpV.x, tmpV.y, tmpV.z);
       this.pMesh.setMatrixAt(i, tmpM);
-      this.pMesh.setColorAt(i, p.L.color);
+      this.pMesh.setColorAt(i, p.color);
       i++;
     }
     this.pMesh.count = i;
@@ -685,22 +825,41 @@ export class Scene {
       if (v.el.hidden) continue;
       const level = loadLevel(n.util, n.down);
       let stat;
-      if (n.down) stat = sim.params.autoRestart ? `DOWN · restart in ${Math.max(0, Math.ceil(8 - n.downFor))}s` : 'DOWN';
+      if (n.down) stat = sim.params.autoRestart ? `DOWN · restart in ${Math.max(0, Math.ceil(n.restartSecs - n.downFor))}s` : 'DOWN';
       else if (n.type === 'cache' && !n.active) stat = 'disabled';
       else if (n.type === 'kafka') stat = `${fmtRate(n.inRate)} msg/s · lag ${fmtRate(Math.max(n.lag, n.lagCH))}`;
       else if (n.type === 'lake') stat = `${fmtGB(n.storedGB)} · ${n.files.toLocaleString()} files`;
-      else if (n.type === 'clickhouse') stat = `${fmtRate(n.insertRate)} rows/s · ${fmtRate(n.outRate)} q/s`;
+      else if (n.type === 'clickhouse') stat = `OLAP · ${fmtRate(n.insertRate)} rows/s · ${fmtRate(n.outRate)} q/s`;
       else if (n.type === 'trino' || n.type === 'bi') stat = `${n.outRate.toFixed(1)} queries/s`;
-      else if (n.type === 'queue') stat = `depth ${fmtRate(n.queue)}`;
-      else if (n.type === 'cache') stat = `${Math.round(n.hitRatio * n.warm * 100)}% hits`;
-      else if (n.type === 'db') stat = `${fmtRate(n.outRate)} qps`;
+      else if (n.type === 'queue') stat = `${Math.round(n.queue).toLocaleString()} jobs waiting`;
+      else if (n.type === 'cache') stat = `${rawMetric(n, 'mem', sim.params)} · ${Math.round(n.hitRatio * n.warm * 100)}% hits`;
+      else if (n.type === 'db') stat = `OLTP · ${fmtRate(n.outRate)} qps`;
       else if (n.type === 'worker') stat = `${fmtRate(n.outRate)} jobs/s`;
       else if (n.type === 'consumer') stat = `${fmtRate(n.outRate)} msg/s`;
       else stat = `${fmtRate(n.type === 'client' ? n.outRate : n.inRate)} req/s`;
-      v.elName.textContent = n.label;
+      // line 1: logo + technology; line 2: the role it plays
+      const tech = n.tech;
+      const sig = (tech ? tech.name : '') + n.label;
+      if (v.techSig !== sig) {
+        v.techSig = sig;
+        const isDb = n.type === 'db' || n.type === 'clickhouse';
+        // web servers share one technology, so their number is the useful part
+        v.elName.innerHTML = !tech ? n.label : logoSVG(tech.logo, 14) + (n.type === 'web' ? n.label : tech.name);
+        v.elRole.textContent = !tech ? '' : n.type === 'web' ? tech.name : isDb ? NODE_INFO[n.type].title : n.label;
+        v.decal.visible = !!tech;
+        if (tech) {
+          if (v.decal.material.map) v.decal.material.map.dispose();
+          v.decal.material.map = new THREE.CanvasTexture(logoCanvas(tech.logo));
+          v.decal.material.map.colorSpace = THREE.SRGBColorSpace;
+          v.decal.material.needsUpdate = true;
+        }
+      }
       v.elStat.textContent = stat;
       v.elData.textContent = n.down || (n.type === 'cache' && !n.active) ? '' : fmtBits(n.bps);
       v.el.dataset.level = level;
+      v.el.classList.toggle('hover', this.hoverId === id);
+      // while wiring, show which components the chosen one may connect to
+      v.el.dataset.wire = !this.connecting ? '' : !this.connectFrom ? 'pick' : id === this.connectFrom ? 'from' : sim.canConnect(this.connectFrom, id) ? 'ok' : 'no';
       v.elBar.style.width = Math.min(100, n.util * 100) + '%';
       v.elBar.parentNode.style.visibility = n.type === 'client' || n.type === 'bi' ? 'hidden' : '';
     }

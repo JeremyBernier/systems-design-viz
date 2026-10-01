@@ -1,4 +1,7 @@
 import { NODE_INFO, HISTORY, fmtRate, fmtDur, fmtBits, fmtBytes, fmtGB, rawMetric } from './sim.js';
+import { TECH, logoSVG } from './tech.js';
+import { PRESETS } from './presets.js';
+import { costs, nodeCost, fmtUSD } from './cost.js';
 import { loadLevel } from './scene.js';
 
 const $ = (id) => document.getElementById(id);
@@ -39,6 +42,8 @@ const TIPS = [
   ['Cache stampede', 'At ~4,000 req/s with 4+ servers, kill the cache. All reads hit the database at once.'],
   ['Hidden backlog', 'The job queue and Kafka absorb overload silently. Watch queue depth and consumer lag grow while requests still succeed.'],
   ['Fill the disk', 'Raise the write percentage and watch database storage climb until writes are refused.'],
+  ['Build it yourself', 'Remove the cache, place it again from Build, then use Connect to wire web servers to it. An unwired component does nothing.'],
+  ['Swap the technology', 'Click any component and change its technology. DynamoDB throttles instead of crashing; Lambda cannot be knocked over but costs more at high traffic; Firehose ends the small-files problem. Watch latency, freshness and cost.'],
   ['Small files problem', 'Turn off Iceberg compaction and watch the lake file count climb. A few minutes later Trino queries crawl.'],
   ['Starve ingestion', 'Push dashboard queries past ~100/s. ClickHouse spends its CPU on queries, inserts fall behind and dashboards go stale.'],
 ];
@@ -133,7 +138,10 @@ class Chart {
 
 // ---------------------------------------------------------------- UI
 export class UI {
-  constructor(sim, { onSelect, onPause, onReset }) {
+  constructor(sim, { onSelect, onPause, onReset, onStartPlace, onConnectMode, onPreset }) {
+    this.onStartPlace = onStartPlace;
+    this.onConnectMode = onConnectMode;
+    this.mode = null; // null | 'place' | 'connect'
     this.sim = sim;
     this.onSelect = onSelect;
     this.selected = null;
@@ -166,7 +174,8 @@ export class UI {
     for (const b of document.querySelectorAll('[data-step]'))
       b.addEventListener('click', () => {
         const k = b.dataset.step;
-        p[k] = Math.min(6, Math.max(1, p[k] + +b.dataset.d));
+        if (k === 'web') +b.dataset.d > 0 ? sim.addWeb() : sim.removeWeb();
+        else p[k] = Math.min(6, Math.max(1, p[k] + +b.dataset.d));
         if (this.selected && !sim.nodes[this.selected].active) this.onSelect(null);
         this.syncControls();
       });
@@ -174,11 +183,26 @@ export class UI {
       p.queryRate = +e.target.value;
       this.syncControls();
     });
-    for (const k of ['cacheEnabled', 'autoRestart', 'compaction']) $(k).addEventListener('change', (e) => (p[k] = e.target.checked));
+    for (const k of ['autoRestart', 'compaction']) $(k).addEventListener('change', (e) => (p[k] = e.target.checked));
+    const preset = $('preset');
+    preset.innerHTML = Object.entries(PRESETS).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('');
+    this.setPreset = (key) => {
+      const pr = PRESETS[key];
+      preset.value = key;
+      $('preset-blurb').innerHTML = pr.blurb + (pr.missing ? `<br><br>${pr.missing}` : '');
+    };
+    preset.addEventListener('change', () => {
+      onPreset(PRESETS[preset.value]);
+      this.setPreset(preset.value);
+      $('log').innerHTML = '';
+      this.syncControls();
+    });
+    this.setPreset('reference');
     $('spike').addEventListener('click', () => sim.triggerSpike());
     $('pause').addEventListener('click', () => ($('pause').textContent = onPause() ? 'Resume' : 'Pause'));
     $('reset').addEventListener('click', () => {
       onReset();
+      this.setPreset('reference');
       $('log').innerHTML = '';
       this.syncControls();
     });
@@ -187,9 +211,8 @@ export class UI {
       $('v-traffic').textContent = p.traffic.toLocaleString();
       $('write').value = p.writePct;
       $('v-write').textContent = p.writePct + '%';
-      $('v-webCount').textContent = p.webCount;
+      $('v-webCount').textContent = sim.webCount;
       $('v-workerCount').textContent = p.workerCount;
-      $('cacheEnabled').checked = p.cacheEnabled;
       $('autoRestart').checked = p.autoRestart;
       $('compaction').checked = p.compaction;
       $('queries').value = p.queryRate;
@@ -197,8 +220,18 @@ export class UI {
     };
     this.syncControls();
 
+    $('detail').addEventListener('click', (e) => {
+      const row = e.target.closest('.cost-row[data-id]');
+      if (row) this.onSelect(row.dataset.id);
+    });
     $('banner').addEventListener('click', () => sim.bottleneck && this.onSelect(sim.bottleneck.id));
-    addEventListener('keydown', (e) => e.key === 'Escape' && this.onSelect(null));
+    addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape') return;
+      if (this.mode) this.setMode(null);
+      else this.onSelect(null);
+    });
+    $('connect').addEventListener('click', () => this.setMode(this.mode === 'connect' ? null : 'connect'));
+    this.setMode(null);
 
     sim.on('log', (kind, msg) => {
       const li = document.createElement('li');
@@ -214,14 +247,79 @@ export class UI {
     this.select(null);
   }
 
+  // Build modes: placing a new component, or wiring two together.
+  setMode(mode, placingId = null) {
+    this.mode = mode;
+    this.placingId = mode === 'place' ? placingId : null;
+    $('connect').setAttribute('aria-pressed', mode === 'connect');
+    $('connect').textContent = mode === 'connect' ? 'Done connecting' : 'Connect components';
+    $('build-hint').textContent =
+      mode === 'place'
+        ? `Click the floor to place the ${NODE_INFO[this.sim.nodes[placingId].type].title}. It starts with no connections. Esc cancels.`
+        : mode === 'connect'
+          ? 'Click one component, then another. Sensible pairs are connected (or disconnected if already wired).'
+          : 'Drag any component to move it. Click one to inspect, rewire or remove it.';
+    for (const b of $('palette').children) b.setAttribute('aria-pressed', b.dataset.id === this.placingId);
+    if (mode === 'place') this.onStartPlace(placingId);
+    else this.onConnectMode(mode === 'connect');
+  }
+
+  toast(msg, kind = 'ok') {
+    const t = $('toast');
+    t.textContent = msg;
+    t.dataset.k = kind;
+    t.hidden = false;
+    clearTimeout(this._toast);
+    this._toast = setTimeout(() => (t.hidden = true), 4200);
+  }
+
+  _renderPalette() {
+    const items = this.sim.placeable();
+    const sig = items.map((n) => n.id).join();
+    if (sig === this._paletteSig) return;
+    this._paletteSig = sig;
+    const pal = $('palette');
+    pal.innerHTML = items.length ? '' : '<span class="hint">Every component is in the diagram. Remove one to place it again.</span>';
+    for (const n of items) {
+      const b = document.createElement('button');
+      b.dataset.id = n.id;
+      b.textContent = '+ ' + NODE_INFO[n.type].title;
+      b.addEventListener('click', () => this.setMode(this.placingId === n.id ? null : 'place', n.id));
+      pal.append(b);
+    }
+  }
+
+  _renderConnections() {
+    const box = $('d-conns');
+    if (!box) return;
+    const edges = this.sim.possibleEdges(this.selected).filter((e) => e.other.active);
+    const sig = edges.map((e) => e.id + this.sim.edges.has(e.id)).join();
+    if (sig === this._connSig) return;
+    this._connSig = sig;
+    box.innerHTML = edges.length ? '' : '<li class="hint">Nothing in the diagram that it can connect to.</li>';
+    for (const e of edges) {
+      const li = document.createElement('li');
+      const label = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = this.sim.edges.has(e.id);
+      cb.addEventListener('change', () => this.sim.toggleEdge(e.id, cb.checked));
+      label.append(cb, `${e.out ? 'sends to' : 'receives from'} ${e.other.label}`);
+      li.append(label);
+      box.append(li);
+    }
+  }
+
   // Build the right-hand panel for a node (or the intro when nothing is selected).
   select(id) {
     this.selected = id;
     const el = $('detail');
     this.charts = [];
     if (!id) {
+      this._costSig = null;
       el.innerHTML =
-        `<h2>How to use</h2><p class="d-about">Each dot is a slice of live traffic. <b>Click any component</b> to zoom inside and see its CPU, memory, storage and network. Drag to orbit, scroll to zoom.</p>` +
+        `<h2>How to use</h2><p class="d-about">Each dot is a slice of live traffic. <b>Click any component</b> to zoom inside and see its CPU, memory, storage and network. Drag the floor to orbit, scroll to zoom. Use <b>Build</b> on the left to add components and wire them together.</p>` +
+        `<h2>Estimated cost</h2><div id="costs"></div><p class="hint">Ballpark from public on-demand list prices (AWS / Google Cloud). No discounts or reserved pricing.</p>` +
         `<h2>Experiments to try</h2><ol class="tips">${TIPS.map(([t, d]) => `<li><b>${t}.</b> ${d}</li>`).join('')}</ol>`;
       return;
     }
@@ -230,9 +328,24 @@ export class UI {
     el.innerHTML = `
       <button id="d-back">← Overview</button>
       <div class="d-head" style="margin-top:10px">
-        <div><h3>${node.label}</h3><div class="d-kind">${info.kind}</div></div>
+        <div class="d-title">${node.tech ? logoSVG(node.tech.logo, 34) : ''}<div><h3>${node.label}</h3><div class="d-kind">${node.tech && node.tech.name !== node.label ? node.tech.name + ' · ' : ''}${node.kind || info.kind}</div></div></div>
         <span class="badge" id="d-badge"></span>
       </div>
+      ${
+        TECH[node.type]
+          ? `<label class="engine">Technology<select id="d-engine">${Object.entries(TECH[node.type])
+              .map(([k, e]) => `<option value="${k}"${e === node.tech ? ' selected' : ''}>${e.name} — ${e.vendor}</option>`)
+              .join('')}</select></label>${node.type === 'web' ? '<p class="hint">Applies to every web server.</p>' : ''}`
+          : ''
+      }
+      ${
+        node.tech
+          ? `<h2>What is ${node.tech.name}?</h2><p class="d-about">${node.tech.about}</p>${
+              node.tech.about !== info.about ? `<h2>Its role here: ${info.title}</h2><p class="d-about">${info.about}</p>` : ''
+            }`
+          : `<h2>What it is</h2><p class="d-about">${info.about}</p>`
+      }
+      <h2>Right now</h2>
       <div class="d-status" id="d-status"></div>
       <h2>Hardware</h2>
       ${RESOURCES.map(
@@ -247,9 +360,17 @@ export class UI {
       ).join('')}
       <h2>Live metrics</h2>
       <dl class="stats" id="d-stats"></dl>
+      <p class="hint" id="d-cost"></p>
+      <h2>Connections</h2>
+      <ul class="conns" id="d-conns"></ul>
       <div class="btns" id="d-actions"></div>
-      <h2>What it does</h2>
-      <p class="d-about">${info.about}</p>`;
+`;
+    this._connSig = null;
+    if (TECH[node.type])
+      $('d-engine').addEventListener('change', (e) => {
+        this.sim.setTech(node.type, e.target.value);
+        this.select(id);
+      });
     $('d-back').addEventListener('click', () => this.onSelect(null));
     this.meters = RESOURCES.map(([k, name]) => {
       const m = el.querySelector(`[data-res="${k}"]`);
@@ -267,6 +388,14 @@ export class UI {
       kill.id = 'd-kill';
       kill.addEventListener('click', () => (node.down ? this.sim.restart(id) : this.sim.kill(id)));
       act.append(kill);
+      const rm = document.createElement('button');
+      rm.textContent = 'Remove';
+      rm.addEventListener('click', () => {
+        this.sim.setActive(id, false);
+        this.onSelect(null);
+        this.syncControls();
+      });
+      act.append(rm);
       if (node.type === 'db') {
         const add = document.createElement('button');
         add.textContent = 'Add storage';
@@ -284,29 +413,29 @@ export class UI {
       case 'client':
         return [['Sending', r(n.outRate)], ['Reads / writes', `${100 - p.writePct}% / ${p.writePct}%`], ['Success rate', pct(1 - this.sim.totals.errPct)], ['Avg response time', fmtDur(this.sim.totals.latency)]];
       case 'lb':
-        return [['Requests in', `${fmtRate(n.inRate)} of 50.0k req/s`], ['Healthy backends', `${this.sim.webs.filter((w) => w.active && !w.down).length} of ${p.webCount}`], ['Rejected (503)', r(n.dropRate)]];
+        return [['Requests in', `${fmtRate(n.inRate)} of ${fmtRate(n.cap || 0)} req/s`], ['Healthy backends', `${this.sim.webs.filter((w) => w.active && !w.down).length} of ${this.sim.webCount}`], ['Rejected (503)', r(n.dropRate)]];
       case 'web':
         return [['Arriving', r(n.inRate)], ['Served', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} req/s max`], ['Threads busy', `${Math.round(n.threads * 256)} of 256`], ['Waiting in memory', `${fmtRate(n.queue)} requests`], ['Response time', fmtDur(n.latency)], ['Rejected (503)', r(n.dropRate)], ['Crash risk', pct(n.stress)], ['Crashes so far', n.crashes]];
       case 'cache':
         return [['Lookups', `${fmtRate(n.inRate)} of 30.0k ops/s`], ['Hit ratio', pct(n.hitRatio * n.warm)], ['Hits (served from RAM)', r(n.outRate, 'ops/s')], ['Misses → database', r(n.missRate, 'ops/s')], ['Warmth', pct(n.warm)]];
       case 'db':
-        return [['Reads', r(n.readRate, 'qps')], ['Writes (4× cost)', r(n.writeRate, 'qps')], ['Query load', `${fmtRate(n.load || 0)} of 4.00k units/s`], ['Query latency', fmtDur(n.latency)], ['Connections open', `${Math.round(n.conns * 500)} of 500`], ['Failed queries', r(n.dropRate, 'qps')], ['Crash risk', pct(n.stress)]];
+        return [['Reads', r(n.readRate, 'qps')], [`Writes (${n.writeCost}× the cost of a read)`, r(n.writeRate, 'qps')], ['Query load', `${fmtRate(n.load || 0)} of ${fmtRate(n.capUnits || 0)} units/s`], ['Query latency', fmtDur(n.latency)], ['Connections open', n.maxConns ? `${Math.round(n.conns * n.maxConns)} of ${n.maxConns}` : 'none (stateless API)'], ['Data stored', fmtGB(n.storedGB || 0)], ['Failed queries', r(n.dropRate, 'qps')], ['Crash risk', pct(n.stress)]];
       case 'kafka':
-        return [['Produced', `${fmtRate(n.inRate)} of 25.0k msg/s`], ['Consumed (2 groups)', r(n.outRate, 'msg/s')], ['Lag: lake writer', `${fmtRate(n.lag)} of 150k retained`], ['Lag: ClickHouse', `${fmtRate(n.lagCH)} of 150k retained`], ['Lag per partition', n.partitions.map((v) => fmtRate(v)).join(' · ')], ['Expired unread', r(n.expiredRate, 'msg/s')]];
+        return [['Produced', `${fmtRate(n.inRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Consumed (2 groups)', r(n.outRate, 'msg/s')], ['Lag: lake writer', `${fmtRate(n.lag)} of ${fmtRate(n.retention || 0)} retained`], [`Lag: ${this.sim.nodes.clickhouse.label}`, `${fmtRate(n.lagCH)} of ${fmtRate(n.retention || 0)} retained`], ['Lag per partition', n.partitions.map((v) => fmtRate(v)).join(' · ')], ['Expired unread', r(n.expiredRate, 'msg/s')]];
       case 'consumer':
-        return [['Consuming', `${fmtRate(n.outRate)} of 3.00k msg/s`], ['Behind by', `${fmtRate(this.sim.nodes.kafka.lag)} msgs`], ['Parquet written', fmtBytes(this.sim.nodes.lake.ingestBytes)], ['Iceberg commits', '1 per second']];
+        return [['Reading from Kafka', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Raw events in', fmtBytes(n.outRate * 2e3)], ['Behind by', `${fmtRate(this.sim.nodes.kafka.lag)} msgs`], ['Parquet out → data lake', fmtBytes(this.sim.nodes.lake.ingestBytes)], ['Small files written', `${this.sim.techOf('consumer').files} per second`]];
       case 'queue':
-        return [['Enqueued', r(n.inRate, 'jobs/s')], ['Dequeued', r(n.outRate, 'jobs/s')], ['Depth', `${fmtRate(n.queue)} of 20.0k`], ['Wait for a new job', fmtDur(n.latency || 0)], ['Rejected', r(n.dropRate, 'jobs/s')]];
+        return [['Enqueued', r(n.inRate, 'jobs/s')], ['Dequeued', r(n.outRate, 'jobs/s')], ['Jobs in queue', `${Math.round(n.queue).toLocaleString()} of ${(n.qmax || 0).toLocaleString()}`], ['Wait for a new job', fmtDur(n.latency || 0)], ['Rejected', r(n.dropRate, 'jobs/s')]];
       case 'lake':
         return [['Data stored', fmtGB(n.storedGB)], ['Parquet files', n.files.toLocaleString()], ['Small files awaiting compaction', Math.round(n.smallFiles).toLocaleString()], ['Ingest (compressed)', fmtBytes(n.ingestBytes)], ['Compression vs raw JSON', '6×'], ['S3 PUT requests', `${n.putRate.toFixed(1)} /s`], ['S3 GET requests', `${fmtRate(n.getRate)} /s`], ['Iceberg snapshots', Math.round(n.snapshots).toLocaleString()], ['Compaction', p.compaction ? 'on' : 'off']];
       case 'clickhouse':
-        return [['Inserting', `${fmtRate(n.insertRate)} of ${fmtRate(n.insertCap || 0)} rows/s max`], ['Ingestion lag', `${fmtRate(this.sim.nodes.kafka.lagCH)} rows`], ['Queries', `${n.outRate.toFixed(1)} of ${Math.round(n.qCap || 0)} /s`], ['Query latency', fmtDur(n.latency)], ['Queries waiting', `${Math.round(n.queue)} of 150`], ['Active parts', `${Math.round(n.parts)} of 300`], ['Rejected queries', `${n.dropRate.toFixed(1)} /s`], ['Crash risk', pct(n.stress)]];
+        return [['Inserting', `${fmtRate(n.insertRate)} of ${fmtRate(n.insertCap || 0)} rows/s max`], ['Ingestion lag', `${fmtRate(this.sim.nodes.kafka.lagCH)} rows`], ['Queries', `${n.outRate.toFixed(1)} of ${Math.round(n.qCap || 0)} /s`], ['Query latency', fmtDur(n.latency)], ['Queries waiting', `${Math.round(n.queue)} of ${n.qmax || 0}`], ['Active parts', n.partsModel ? `${Math.round(n.parts)} of 300` : 'n/a'], ['Data stored', fmtGB(n.storedGB || 0)], ['Rejected queries', `${n.dropRate.toFixed(1)} /s`], ['Crash risk', pct(n.stress)]];
       case 'trino':
         return [['Queries', `${n.outRate.toFixed(1)} of ${(n.cap || 0).toFixed(1)} /s`], ['CPU per query', `${n.cost.toFixed(1)} core-seconds`], ['Query latency', n.latency ? fmtDur(n.latency) : '—'], ['Queries waiting', `${Math.round(n.queue)} of 40`], ['Files opened per query', Math.round(24 + this.sim.nodes.lake.smallFiles * 0.2)], ['Rejected queries', `${n.dropRate.toFixed(1)} /s`], ['Crash risk', pct(n.stress)]];
       case 'bi':
-        return [['Queries sent', `${n.outRate.toFixed(1)} /s`], ['Real-time (ClickHouse)', fmtDur(n.chLatency)], ['Ad-hoc (Trino)', fmtDur(n.trLatency)], ['ClickHouse data is behind by', fmtDur(n.freshCH)], ['Lake data is behind by', fmtDur(n.freshLake)], ['Failing queries', `${n.failRate.toFixed(1)} /s`]];
+        return [['Queries sent', `${n.outRate.toFixed(1)} /s`], [`Real-time (${this.sim.nodes.clickhouse.label})`, fmtDur(n.chLatency)], ['Ad-hoc (Trino)', fmtDur(n.trLatency)], [`${this.sim.nodes.clickhouse.label} data is behind by`, fmtDur(n.freshCH)], ['Lake data is behind by', fmtDur(n.freshLake)], ['Failing queries', `${n.failRate.toFixed(1)} /s`]];
       case 'worker':
-        return [['Processing', `${fmtRate(n.outRate)} of ${p.workerCount * 120} jobs/s`], ['Workers', `${p.workerCount} × 120 jobs/s`]];
+        return [['Processing', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} jobs/s`], ['Workers', `${p.workerCount} × ${Math.round((n.cap || 0) / p.workerCount)} jobs/s`]];
     }
     return [];
   }
@@ -330,7 +459,26 @@ export class UI {
     banner.hidden = !bn || bn.id === this.selected;
     if (bn) banner.innerHTML = `<b>Bottleneck: ${bn.label}</b> <span>— ${bn.status} Click to inspect.</span>`;
 
-    if (!this.selected) return;
+    const cost = costs(sim);
+    $('t-cost').textContent = fmtUSD(cost.total);
+    $('t-cpm').textContent = cost.perMillion ? `per month · ${fmtUSD(cost.perMillion)} per 1M requests` : 'per month';
+    this._renderPalette();
+    $('v-webCount').textContent = sim.webCount;
+
+    if (!this.selected) {
+      // cost breakdown: sorted bars, one hue
+      const box = $('costs');
+      const max = cost.items[0] ? cost.items[0].monthly : 1;
+      box.innerHTML =
+        `<div class="cost-total"><span>Total</span><b>${fmtUSD(cost.total)} / month</b></div>` +
+        cost.items
+          .filter((i) => i.monthly >= 0.5)
+          .map((i) => `<div class="cost-row" ${i.id ? `data-id="${i.id}"` : ''} title="${i.basis}"><span>${i.label}</span><b>${fmtUSD(i.monthly)}</b><i style="width:${(i.monthly / max) * 100}%"></i></div>`)
+          .join('');
+      return;
+    }
+    if (!sim.nodes[this.selected].active) return this.onSelect(null);
+    this._renderConnections();
     const n = sim.nodes[this.selected];
     const level = loadLevel(n.util, n.down);
     const badge = $('d-badge');
@@ -348,7 +496,9 @@ export class UI {
       m.raw.textContent = rawMetric(n, m.k, sim.params);
       m.bar.style.width = Math.min(100, v * 100) + '%';
     }
-    const data = [];
+    const c = nodeCost(sim, n);
+    $('d-cost').textContent = c.basis;
+    const data = [['Estimated cost', `${fmtUSD(c.monthly)} / month`]];
     if (n.type === 'db' || n.type === 'kafka' || n.type === 'clickhouse') data.push(['Disk throughput', fmtBytes(n.diskIO)]);
     $('d-stats').innerHTML = [...this._stats(n), ...data].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
     const kill = $('d-kill');

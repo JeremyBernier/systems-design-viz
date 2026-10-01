@@ -1,9 +1,29 @@
+import { TECH, DEFAULT_TECH } from './tech.js';
+
 // Rate-based ("fluid") simulation of a small web service.
 // Every node has a capacity, a bounded backlog, and four hardware resources
 // (cpu / mem / disk / net, each 0..1). Overload fills the backlog, a full
 // backlog sheds load, and sustained overload crashes the node.
 
 export const MAX_WEB = 6;
+
+// Which kinds of component may talk to which. Direction is who initiates the call.
+export const EDGE_TYPES = [
+  ['client', 'lb'],
+  ['lb', 'web'],
+  ['web', 'cache'],
+  ['web', 'db'],
+  ['web', 'queue'],
+  ['web', 'kafka'],
+  ['cache', 'db'],
+  ['queue', 'worker'],
+  ['kafka', 'consumer'],
+  ['kafka', 'clickhouse'],
+  ['consumer', 'lake'],
+  ['bi', 'clickhouse'],
+  ['bi', 'trino'],
+  ['trino', 'lake'],
+];
 export const HISTORY = 240; // samples kept per metric (4 per second → 60s)
 
 // Average bytes on the wire per HTTP request (request + response) and per Kafka event.
@@ -39,8 +59,9 @@ export function fmtGB(gb) {
 
 // "used / total" in real units for one of a node's four resources.
 export function rawMetric(node, key, params) {
-  if (node.type === 'lake' && key !== 'net') return key === 'disk' ? `${fmtGB(node.storedGB)} stored · no fixed limit` : 'managed by the cloud provider';
-  const spec = SPECS[node.type];
+  if (node.serverless && (key === 'cpu' || key === 'mem')) return 'managed by the cloud provider';
+  if (node.managedDisk && key === 'disk') return `${fmtGB(node.storedGB)} stored · no fixed limit`;
+  const spec = node.spec || SPECS[node.type];
   const n = node.type === 'worker' ? params.workerCount : 1;
   if (key === 'cpu') return `${(node.cpu * spec.cores * n).toFixed(1)} / ${spec.cores * n} cores`;
   if (key === 'mem') return `${fmtGB(node.mem * spec.ramGB * n)} / ${fmtGB(spec.ramGB * n)}`;
@@ -78,22 +99,22 @@ export const NODE_INFO = {
       'Keeps recent query results in RAM so most reads never reach the database. A restarted cache is empty ("cold") — until it warms up, every read falls through to the database, which can knock the database over.',
   },
   db: {
-    title: 'Database',
-    kind: 'Primary SQL database',
+    title: 'OLTP Database',
+    kind: 'Transactional database',
     about:
       'The source of truth. Writes cost about 4× a read because they must hit disk durably. Every write also consumes storage, and a full disk makes the database refuse writes. It is the hardest tier to scale, so it is usually the real bottleneck.',
   },
   kafka: {
-    title: 'Kafka',
-    kind: 'Event stream (append-only log)',
+    title: 'Event Stream',
+    kind: 'Durable log of events',
     about:
-      'Every request appends an event to a partitioned log on disk. Producers never wait for consumers: if the consumer is slow, unread messages simply pile up as "lag". Messages older than the retention limit are deleted — read or not.',
+      'Every request publishes an event here, and any number of downstream systems read the stream independently, each at its own pace. It decouples the application from analytics: the web tier never waits for consumers, and a slow consumer just falls behind ("lag") instead of slowing anyone else down.',
   },
   consumer: {
     title: 'Lake Writer',
     kind: 'Stream processor (e.g. Flink)',
     about:
-      'Reads events from Kafka at its own pace, batches them into Parquet files and commits them to the Iceberg table. Because it pulls rather than being pushed, it can never be overwhelmed — it just falls further behind.',
+      'Not a destination, a processing step: it reads events from Kafka at its own pace, validates and reshapes them, batches them into compressed Parquet files and commits those to the Iceberg table in the data lake. Because it pulls rather than being pushed, it can never be overwhelmed — it just falls further behind.',
   },
   lake: {
     title: 'Data Lake',
@@ -102,16 +123,16 @@ export const NODE_INFO = {
       'Three layers. S3 is cheap object storage with no capacity limit. Parquet is the file format: columnar and compressed, so a query reads only the columns it needs. Iceberg is the table format: metadata that says which files make up the table, giving atomic commits, snapshots and time travel. Frequent commits create many small files, which must be compacted or queries slow down.',
   },
   clickhouse: {
-    title: 'ClickHouse',
-    kind: 'Real-time OLAP database',
+    title: 'OLAP Database',
+    kind: 'Analytical database',
     about:
       'A columnar database built for fast aggregations over billions of rows. It ingests from Kafka in batches; each batch becomes an immutable "part" that background merges combine. Queries, inserts and merges all compete for the same CPU, so heavy dashboards can starve ingestion.',
   },
   trino: {
-    title: 'Trino',
-    kind: 'Lake query engine',
+    title: 'Lake Query Engine',
+    kind: 'SQL over files in the data lake',
     about:
-      'Runs SQL directly on the Parquet files in the lake — it stores nothing itself. Compute and storage are separate, so you can scale either alone. Slower than ClickHouse per query, but it can reach all history cheaply.',
+      'Answers ad-hoc SQL questions by reading Parquet files straight out of the data lake. It stores no data of its own, so compute and storage scale separately. Slower per query than the OLAP database, but it can reach all history cheaply.',
   },
   bi: {
     title: 'Dashboards',
@@ -165,10 +186,9 @@ export class Sim {
     this.params = {
       traffic: 600, // requests / second
       writePct: 10, // % of requests that write
-      webCount: 2,
       workerCount: 2,
-      cacheEnabled: true,
       autoRestart: true,
+      tech: { ...DEFAULT_TECH }, // which concrete technology each kind of component is
       queryRate: 10, // analytics queries / second
       compaction: true, // Iceberg small-file compaction
     };
@@ -190,7 +210,7 @@ export class Sim {
     this.webs = [];
     for (let i = 0; i < MAX_WEB; i++) {
       const w = makeNode('web' + i, 'web', { label: 'Web Server ' + (i + 1), index: i, threads: 0 });
-      w.active = i < this.params.webCount;
+      w.active = i < 2;
       n[w.id] = w;
       this.webs.push(w);
     }
@@ -201,11 +221,15 @@ export class Sim {
     n.queue = makeNode('queue', 'queue');
     n.worker = makeNode('worker', 'worker');
     n.kafka.lagCH = 0;
-    n.lake = makeNode('lake', 'lake', { storedGB: 1240, smallFiles: 0, bigFiles: 3200, files: 3200, snapshots: 8600, putRate: 0, getRate: 0, ingestBytes: 0 });
+    n.lake = makeNode('lake', 'lake', { serverless: true, managedDisk: true, storedGB: 1240, smallFiles: 0, bigFiles: 3200, files: 3200, snapshots: 8600, putRate: 0, getRate: 0, ingestBytes: 0 });
     n.clickhouse = makeNode('clickhouse', 'clickhouse', { parts: 20, diskGB: 380, insertRate: 0, tooManyParts: false });
     n.trino = makeNode('trino', 'trino', { cost: 2 });
     n.bi = makeNode('bi', 'bi');
     this.nodes = n;
+    for (const type in this.params.tech) this.setTech(type, this.params.tech[type], true);
+    // every sensible connection starts wired up
+    this.edges = new Set();
+    for (const id in n) for (const e of this.possibleEdges(id)) this.edges.add(e.id);
     this.time = 0;
     this.spike = 0;
     this.flows = {}; // link id → rate, read by the renderer
@@ -215,6 +239,100 @@ export class Sim {
     this._histAcc = 0;
   }
 
+  // Rebuild the system from a preset: components, technologies and traffic shape.
+  applyPreset(preset) {
+    Object.assign(this.params, preset.params, { tech: { ...DEFAULT_TECH, ...preset.tech } });
+    this.reset();
+    while (this.webCount < preset.webs) this.setActive(this.webs.find((w) => !w.active).id, true);
+    for (const id of preset.remove) this.nodes[id].active = false;
+  }
+
+  techOf(type) {
+    return TECH[type][this.params.tech[type]];
+  }
+
+  // Swap the concrete technology behind every component of one kind.
+  setTech(type, key, quiet = false) {
+    const t = TECH[type] && TECH[type][key];
+    if (!t) return;
+    this.params.tech[type] = key;
+    for (const id in this.nodes) {
+      const node = this.nodes[id];
+      if (node.type !== type) continue;
+      Object.assign(node, { tech: t, kind: t.kind, about: t.about, spec: t.spec || null, serverless: !!t.serverless, managedDisk: !!t.managedDisk, restartSecs: t.restart || 8 });
+      node.queue = node.stress = 0;
+      // databases are known by their product name
+      if (type === 'db' || type === 'clickhouse') node.label = t.name;
+      if (type === 'db') node.diskUsed = 0.35;
+      if (type === 'clickhouse') Object.assign(node, { parts: t.parts ? 20 : 0, tooManyParts: false });
+    }
+    if (!quiet) this.emit('log', 'good', `${NODE_INFO[type].title} is now ${t.name}`);
+  }
+
+  // Every connection this node could have, as { id: 'from>to', other, out }.
+  possibleEdges(id) {
+    const node = this.nodes[id];
+    const out = [];
+    for (const [a, b] of EDGE_TYPES)
+      for (const oid in this.nodes) {
+        const o = this.nodes[oid];
+        if (node.type === a && o.type === b) out.push({ id: `${id}>${oid}`, other: o, out: true });
+        if (node.type === b && o.type === a) out.push({ id: `${oid}>${id}`, other: o, out: false });
+      }
+    return out;
+  }
+
+  // Returns the edge id if these two components can be wired together, else null.
+  canConnect(aId, bId) {
+    const e = this.possibleEdges(aId).find((x) => x.other.id === bId);
+    return e ? e.id : null;
+  }
+
+  toggleEdge(edgeId, on = !this.edges.has(edgeId)) {
+    if (on) this.edges.add(edgeId);
+    else this.edges.delete(edgeId);
+    const [a, b] = edgeId.split('>').map((x) => this.nodes[x].label);
+    this.emit('log', on ? 'good' : 'warn', `${on ? 'Connected' : 'Disconnected'} ${a} → ${b}`);
+    return on;
+  }
+
+  // Add or remove a component. `wired` connects it to everything sensible; otherwise it starts with no connections.
+  setActive(id, on, wired = true) {
+    const node = this.nodes[id];
+    if (node.active === on) return;
+    node.active = on;
+    node.down = false;
+    node.queue = node.stress = node.outRate = node.inRate = node.dropRate = node.util = 0;
+    if (node.type === 'cache') node.warm = 0;
+    if (on) for (const e of this.possibleEdges(id)) wired ? this.edges.add(e.id) : this.edges.delete(e.id);
+    this.emit('log', on ? 'good' : 'warn', `${node.label} ${on ? 'added' : 'removed'}`);
+  }
+
+  // Quick add/remove of a fully wired web server (the +/- stepper).
+  addWeb() {
+    const w = this.webs.find((x) => !x.active);
+    if (w) this.setActive(w.id, true);
+    return w;
+  }
+  removeWeb() {
+    const act = this.webs.filter((x) => x.active);
+    if (act.length > 1) this.setActive(act[act.length - 1].id, false);
+  }
+
+  // Components that are not currently in the diagram, one per type.
+  placeable() {
+    const seen = {};
+    for (const id in this.nodes) {
+      const n = this.nodes[id];
+      if (!n.active && !seen[n.type]) seen[n.type] = n;
+    }
+    return Object.values(seen);
+  }
+
+  get webCount() {
+    return this.webs.filter((w) => w.active).length;
+  }
+
   triggerSpike() {
     this.spike = 6;
     this.emit('log', 'warn', 'Traffic spike: 4× load for 6 seconds');
@@ -222,7 +340,7 @@ export class Sim {
 
   kill(id, reason = 'Killed manually') {
     const node = this.nodes[id];
-    if (!node || node.down) return;
+    if (!node || node.down || !node.active) return;
     node.down = true;
     node.downFor = 0;
     node.queue = 0;
@@ -239,12 +357,13 @@ export class Sim {
     node.down = false;
     node.stress = 0;
     node.queue = 0;
+    if (node.type === 'cache') node.warm = node.tech.persist; // what survived the restart
     this.emit('recover', node);
     this.emit('log', 'good', `${node.label} restarted`);
   }
 
   freeDisk() {
-    this.nodes.db.diskUsed = 0.35;
+    this.nodes.db.diskUsed = Math.min(this.nodes.db.diskUsed, 0.35);
     this.emit('log', 'good', 'Database storage expanded');
   }
 
@@ -266,9 +385,13 @@ export class Sim {
       const node = N[id];
       if (node.down) {
         node.downFor += dt;
-        if (p.autoRestart && node.downFor > 8) this.restart(id);
+        if (p.autoRestart && node.downFor > node.restartSecs) this.restart(id);
       }
     }
+
+    const E = this.edges;
+    const off = (n) => n.down || !n.active; // crashed or not in the diagram
+    const JOB_FRAC = 0.15; // share of requests that enqueue a background job
 
     // ---------- clients ----------
     const wobble = 1 + 0.05 * Math.sin(this.time * 1.7) + 0.03 * Math.sin(this.time * 5.3);
@@ -283,20 +406,20 @@ export class Sim {
 
     // ---------- load balancer ----------
     const lb = N.lb;
-    const LB_CAP = 50000;
+    const LB_CAP = this.techOf('lb').cap;
+    lb.cap = LB_CAP;
     lb.inRate = incoming;
-    this.webs.forEach((w, i) => (w.active = i < p.webCount));
-    const alive = this.webs.filter((w) => w.active && !w.down);
-    let lbOut = lb.down || !alive.length ? 0 : Math.min(incoming, LB_CAP);
+    const alive = this.webs.filter((w) => !off(w) && E.has(`lb>${w.id}`));
+    let lbOut = off(lb) || !E.has('client>lb') || !alive.length ? 0 : Math.min(incoming, LB_CAP);
     lb.outRate = lbOut;
     lb.dropRate = incoming - lbOut;
-    lb.util = lb.down ? 0 : incoming / LB_CAP;
-    lb.cpu = lb.down ? 0 : clamp(0.03 + lb.util * 0.9);
-    lb.mem = lb.down ? 0 : clamp(0.12 + lb.util * 0.3);
+    lb.util = off(lb) ? 0 : incoming / LB_CAP;
+    lb.cpu = off(lb) ? 0 : clamp(0.03 + lb.util * 0.9);
+    lb.mem = off(lb) ? 0 : clamp(0.12 + lb.util * 0.3);
     lb.disk = 0.08;
     lb.bps = incoming * REQ_BYTES * 8;
     lb.latency = 0.001;
-    lb.status = lb.down
+    lb.status = off(lb)
       ? 'Down — nothing can reach the web tier.'
       : !alive.length
         ? 'No healthy web servers to route to. Every request fails with 503.'
@@ -305,30 +428,48 @@ export class Sim {
     // ---------- web servers ----------
     const db = N.db;
     const cache = N.cache;
-    const cacheUp = p.cacheEnabled && !cache.down;
-    cache.active = p.cacheEnabled;
+    const cacheUp = !off(cache);
+    const kafkaUp = !off(N.kafka);
+    const queueUp = !off(N.queue);
     const wf = p.writePct / 100;
     // Latency a web thread spends waiting on its downstream call.
     // Queries give up after QUERY_TIMEOUT; a dead database refuses connections fast.
     const QUERY_TIMEOUT = 0.25;
-    const dbLat = db.down ? 0.05 : Math.min(db.latency, QUERY_TIMEOUT);
+    const FAIL_FAST = 0.001; // no route: the call errors immediately
+    const dbLat = off(db) ? 0.05 : Math.min(db.latency, QUERY_TIMEOUT);
     const hit = cacheUp ? cache.hitRatio * cache.warm : 0;
-    const downstream = (1 - wf) * (hit * 0.001 + (1 - hit) * dbLat) + wf * dbLat;
 
-    const WEB_CPU_CAP = 1200; // rps one server's CPU can handle
+    const webTech = this.techOf('web');
+    const WEB_CPU_CAP = 1200 * webTech.capMul; // rps one server can handle
     const WEB_THREADS = 256;
     const WEB_QMAX = 2400;
     const SVC = 0.02;
     let webServed = 0;
     let webDrop = 0;
     let webLatSum = 0;
+    // where each server's work goes depends on what it is wired to
+    let cacheLookups = 0;
+    let cacheHits = 0;
+    let cacheToDb = 0;
+    let dbReadsArr = 0;
+    let writes = 0;
+    let noRoute = 0;
+    let eventsIn = 0;
+    let jobsArr = 0;
     for (const w of this.webs) {
-      if (!w.active || w.down) {
+      if (off(w)) {
+        w._cache = w._db = w._events = w._jobs = 0;
         w.inRate = w.outRate = w.dropRate = w.util = w.cpu = w.mem = w.bps = 0;
-        w.status = w.down ? 'Process is dead. The load balancer has stopped sending it traffic.' : '';
+        w.status = off(w) ? 'Process is dead. The load balancer has stopped sending it traffic.' : '';
         continue;
       }
-      const arr = lbOut / alive.length;
+      const arr = alive.includes(w) ? lbOut / alive.length : 0;
+      const viaCache = cacheUp && E.has(`${w.id}>cache`);
+      const dbLink = db.active && E.has(`${w.id}>db`);
+      const missViaCache = viaCache && db.active && E.has('cache>db');
+      const missOK = viaCache ? missViaCache || dbLink : dbLink;
+      const hitW = viaCache ? hit : 0;
+      const downstream = (1 - wf) * (hitW * 0.001 + (1 - hitW) * (missOK ? dbLat : FAIL_FAST)) + wf * (dbLink ? dbLat : FAIL_FAST);
       const threadCap = WEB_THREADS / (SVC + downstream);
       // no two machines are identical: the weakest one tips over first
       const cpuCap = WEB_CPU_CAP * (1 - 0.035 * w.index);
@@ -361,29 +502,45 @@ export class Sim {
             ? 'Running hot. Latency climbs as requests start to wait for a free core.'
             : threadBound
               ? 'Thread pool exhausted: every thread is blocked waiting on the slow database. CPU is idle but nothing can get through.'
-              : 'CPU saturated. Requests queue in memory; when the queue fills they are rejected with 503 and memory heads for an out-of-memory kill.';
-      this._stress(w, w.queue >= WEB_QMAX * 0.98, w.util, dt, threadBound ? 'out of memory (threads stuck waiting on the database)' : 'out of memory (request backlog)');
+              : webTech.noCrash
+                ? 'At its concurrency limit. Extra requests are rejected with 429 — but the platform cannot be knocked over.'
+                : 'CPU saturated. Requests queue in memory; when the queue fills they are rejected with 503 and memory heads for an out-of-memory kill.';
+      if (webTech.noCrash) w.stress = 0; // the platform sheds load instead of dying
+      else this._stress(w, w.queue >= WEB_QMAX * 0.98, w.util, dt, threadBound ? 'out of memory (threads stuck waiting on the database)' : 'out of memory (request backlog)');
       webServed += rate;
+      const rd = rate * (1 - wf);
+      const wr = rate * wf;
+      const miss = rd * (1 - hitW);
+      w._cache = viaCache ? rd : 0;
+      w._db = (dbLink ? wr : 0) + (missOK && !missViaCache ? miss : 0);
+      w._events = kafkaUp && E.has(`${w.id}>kafka`) ? rate : 0;
+      w._jobs = queueUp && E.has(`${w.id}>queue`) ? rate * JOB_FRAC : 0;
+      cacheLookups += w._cache;
+      cacheHits += rd * hitW;
+      if (missOK) dbReadsArr += miss;
+      else noRoute += miss;
+      if (missViaCache) cacheToDb += miss;
+      if (dbLink) writes += wr;
+      else noRoute += wr;
+      eventsIn += w._events;
+      jobsArr += w._jobs;
+      if (!dbLink && !viaCache) w.status = 'Not connected to a database or cache, so it has nowhere to read or write data. Every request fails.';
+      else if (!dbLink) w.status = 'No database connection: cached reads work, but every write fails.';
       webDrop += dropped / dt;
       webLatSum += w.latency * rate;
     }
     const webLat = webServed > 0 ? webLatSum / webServed : 0;
 
     // ---------- cache ----------
-    const reads = webServed * (1 - wf);
-    const writes = webServed * wf;
+    const reads = cacheLookups;
     const CACHE_CAP = 30000;
-    let cacheHits = 0;
-    let dbReadsArr = reads;
     if (cacheUp) {
-      const served = Math.min(reads, CACHE_CAP);
-      cacheHits = served * hit;
-      dbReadsArr = reads - cacheHits;
+      const served = reads;
       // warms up as traffic repopulates it (~10s at normal load)
       cache.warm = clamp(cache.warm + (dt * clamp(served / 300, 0, 1)) / 10);
       cache.inRate = reads;
       cache.outRate = cacheHits;
-      cache.missRate = dbReadsArr;
+      cache.missRate = reads - cacheHits;
       cache.util = reads / CACHE_CAP;
       cache.cpu = ease(cache.cpu, clamp(0.02 + cache.util * 0.9), dt);
       cache.mem = ease(cache.mem, 0.1 + 0.72 * cache.warm, dt, 0.2);
@@ -397,21 +554,22 @@ export class Sim {
     } else {
       cache.inRate = cache.outRate = cache.missRate = cache.util = cache.cpu = cache.bps = 0;
       cache.mem = ease(cache.mem, 0, dt, 0.2);
-      if (!cache.down) cache.warm = 0;
-      cache.status = cache.down
+      if (!off(cache)) cache.warm = 0;
+      cache.status = off(cache)
         ? 'Down. All reads now go straight to the database, and the cache will come back empty.'
-        : 'Disabled. Every read goes to the database.';
+        : '';
     }
 
     // ---------- database ----------
-    const DB_CAP = 4000; // cost units / s (read = 1, write = 4)
-    const DB_QMAX = 3000;
-    const WRITE_COST = 4;
-    db.readOnly = db.diskUsed >= 0.999;
+    const eng = this.techOf('db');
+    const DB_CAP = eng.cap; // cost units / s (a read = 1)
+    const DB_QMAX = eng.qmax;
+    const WRITE_COST = eng.writeCost;
+    db.readOnly = !eng.managedDisk && db.diskUsed >= 0.999;
     let dbReadOk = 0;
     let dbWriteOk = 0;
     let dbFail = 0;
-    if (db.down) {
+    if (off(db)) {
       dbFail = dbReadsArr + writes;
       db.inRate = dbReadsArr + writes;
       db.outRate = db.readRate = db.writeRate = db.util = db.cpu = db.mem = db.bps = db.diskIO = db.conns = 0;
@@ -448,17 +606,27 @@ export class Sim {
       // a write hits the log and the data file; most reads are served from the buffer pool
       db.diskIO = dbWriteOk * 16e3 + dbReadOk * 1e3;
       // each write stores data: ~1% of disk per 12,000 writes
-      db.diskUsed = clamp(db.diskUsed + (dbWriteOk * dt) / 1.2e6);
+      const grown = db.diskUsed + (dbWriteOk * dt * 500) / 1.2e6 / eng.spec.diskGB;
+      db.diskUsed = eng.managedDisk ? grown : clamp(grown);
       db.status = db.readOnly
         ? 'Disk full. The database has gone read-only: every write is rejected. Add storage to recover.'
         : db.util < 0.7
           ? 'Healthy. Queries return in a few milliseconds.'
           : db.util < 1
             ? 'Running hot. Query latency is climbing, which holds web server threads longer.'
-            : 'Overloaded. Queries pile up, the connection pool is exhausted, and web servers stall waiting for answers.';
-      this._stress(db, db.queue >= DB_QMAX * 0.98, db.util, dt, 'connection pool exhausted');
+            : eng.serverless
+              ? 'Over provisioned capacity. Excess requests are throttled at once — they fail fast instead of queuing, and nothing crashes.'
+              : eng.crash
+                ? 'Overloaded. Queries pile up, connections run out, and web servers stall waiting for answers.'
+                : 'Overloaded. Latency climbs and requests time out; add nodes to add capacity.';
+      if (eng.crash) this._stress(db, db.queue >= DB_QMAX * 0.98, db.util, dt, eng.crash);
+      else db.stress = 0;
     }
-    db.disk = db.diskUsed;
+    db.disk = eng.managedDisk ? 0 : db.diskUsed;
+    db.storedGB = db.diskUsed * eng.spec.diskGB;
+    db.maxConns = eng.conns;
+    db.capUnits = eng.cap;
+    db.writeCost = eng.writeCost;
 
     // ---------- kafka → two consumer groups (lake writer, ClickHouse) ----------
     const kafka = N.kafka;
@@ -467,29 +635,34 @@ export class Sim {
     const ch = N.clickhouse;
     const trino = N.trino;
     const bi = N.bi;
-    const KAFKA_CAP = 25000;
-    const RETENTION = 150000; // messages kept on disk
-    const CONSUME_CAP = 3000;
-    const produced = kafka.down ? 0 : Math.min(webServed, KAFKA_CAP);
-    kafka.inRate = webServed;
-    kafka.dropRate = webServed - produced;
+    const KAFKA_CAP = this.techOf('kafka').cap;
+    const RETENTION = this.techOf('kafka').retention; // unread messages kept
+    const writer = this.techOf('consumer');
+    const CONSUME_CAP = writer.cap;
+    kafka.cap = KAFKA_CAP;
+    kafka.retention = RETENTION;
+    consumer.cap = CONSUME_CAP;
+    const produced = off(kafka) ? 0 : Math.min(eventsIn, KAFKA_CAP);
+    kafka.inRate = eventsIn;
+    kafka.dropRate = eventsIn - produced;
 
-    // Dashboards: 80% of queries are real-time panels on ClickHouse, 20% are ad-hoc SQL on the lake via Trino.
-    const qTotal = bi.down ? 0 : p.queryRate * (1 + 0.08 * Math.sin(this.time * 0.9));
-    const chQArr = qTotal * 0.8;
-    const trQArr = qTotal * 0.2;
+    // Dashboards: 90% of queries are real-time panels on ClickHouse, 10% are ad-hoc SQL on the lake via Trino.
+    const qTotal = off(bi) ? 0 : p.queryRate * (1 + 0.08 * Math.sin(this.time * 0.9));
+    const chQArr = E.has('bi>clickhouse') ? qTotal * 0.9 : 0;
+    const trQArr = E.has('bi>trino') ? qTotal * 0.1 : 0;
 
     // ClickHouse shares one CPU budget: queries take what they need, inserts and merges get what is left.
-    const CH_CORES = 16;
-    const CH_Q_COST = 0.11; // core-seconds per dashboard query
+    const olap = this.techOf('clickhouse');
+    const CH_CORES = olap.cores;
+    const CH_Q_COST = olap.qCost; // core-seconds per dashboard query
     const CH_ROWS_PER_CORE = 1500;
-    const CH_QMAX = 150;
+    const CH_QMAX = olap.qmax;
     const CH_PARTS_LIMIT = 300;
     const chQCap = (CH_CORES - 1) / CH_Q_COST;
     let chServed = 0;
     let chFree = 0;
     let chInsertCap = 0;
-    if (!ch.down) {
+    if (!off(ch)) {
       ch.queue += chQArr * dt;
       const served = Math.min(ch.queue, chQCap * dt);
       ch.queue -= served;
@@ -503,13 +676,13 @@ export class Sim {
       chFree = Math.max(0, CH_CORES - chServed * CH_Q_COST);
       if (ch.parts > CH_PARTS_LIMIT) ch.tooManyParts = true;
       else if (ch.parts < CH_PARTS_LIMIT / 2) ch.tooManyParts = false;
-      chInsertCap = Math.min(9000, chFree * 0.75 * CH_ROWS_PER_CORE) * (ch.tooManyParts ? 0.1 : 1);
+      chInsertCap = (olap.shared ? Math.min(olap.insertMax, chFree * 0.75 * CH_ROWS_PER_CORE) : olap.insertMax) * (ch.tooManyParts ? 0.1 : 1) * (E.has('kafka>clickhouse') ? 1 : 0);
     }
 
     // Each consumer group keeps its own position in the log, so each has its own lag.
     let expired = 0;
     const consume = (key, cap) => {
-      if (kafka.down) return 0;
+      if (off(kafka)) return 0;
       kafka[key] += produced * dt;
       const c = Math.min(kafka[key] / dt, cap);
       kafka[key] -= c * dt;
@@ -519,10 +692,10 @@ export class Sim {
       }
       return c;
     };
-    const consumed = consume('lag', consumer.down || lake.down ? 0 : CONSUME_CAP);
+    const consumed = consume('lag', off(consumer) || off(lake) || !E.has('kafka>consumer') || !E.has('consumer>lake') ? 0 : CONSUME_CAP);
     const inserted = consume('lagCH', chInsertCap);
     const maxLag = Math.max(kafka.lag, kafka.lagCH);
-    if (!kafka.down) {
+    if (!off(kafka)) {
       kafka.expiredRate = ease(kafka.expiredRate, expired / dt, dt, 0.2);
       kafka.outRate = consumed + inserted;
       kafka.util = produced / KAFKA_CAP;
@@ -536,7 +709,7 @@ export class Sim {
         kafka.expiredRate > 1
           ? 'Retention limit hit: the oldest unread events are being deleted before a consumer reaches them. That data is lost.'
           : maxLag > 2000
-            ? `${kafka.lag > kafka.lagCH ? 'The lake writer' : 'ClickHouse'} is falling behind: events are produced faster than it reads them. Nothing breaks yet — the log just gets longer.`
+            ? `${kafka.lag > kafka.lagCH ? 'The lake writer' : ch.label} is falling behind: events are produced faster than it reads them. Nothing breaks yet — the log just gets longer.`
             : 'Healthy. Both consumer groups read events as fast as they are produced.';
     } else {
       kafka.outRate = kafka.util = kafka.cpu = kafka.bps = kafka.diskIO = kafka.expiredRate = 0;
@@ -545,14 +718,14 @@ export class Sim {
 
     // ---------- lake writer ----------
     consumer.inRate = consumer.outRate = consumed;
-    consumer.util = consumer.down ? 0 : produced / CONSUME_CAP;
-    consumer.cpu = ease(consumer.cpu, consumer.down ? 0 : clamp(0.04 + (consumed / CONSUME_CAP) * 0.96), dt);
-    consumer.mem = consumer.down ? 0 : 0.4;
+    consumer.util = off(consumer) ? 0 : produced / CONSUME_CAP;
+    consumer.cpu = ease(consumer.cpu, off(consumer) ? 0 : clamp(0.04 + (consumed / CONSUME_CAP) * 0.96), dt);
+    consumer.mem = off(consumer) ? 0 : 0.4;
     consumer.disk = 0.3;
     consumer.bps = consumed * EVENT_BYTES * 8 * (1 + 1 / PARQUET_RATIO);
-    consumer.status = consumer.down
+    consumer.status = off(consumer)
       ? 'Down. Kafka keeps the events on disk, so it can catch up after a restart — if retention allows.'
-      : lake.down
+      : off(lake)
         ? 'Cannot commit: object storage is unreachable. It has stopped reading from Kafka rather than lose data.'
         : consumer.util > 1
           ? 'Reading at full speed and still falling behind. Add writers (and partitions) to catch up.'
@@ -560,10 +733,10 @@ export class Sim {
 
     // ---------- data lake: S3 + Iceberg + Parquet ----------
     const parquetBytes = (consumed * EVENT_BYTES) / PARQUET_RATIO;
-    // one small Parquet file per Kafka partition per commit
-    const commits = lake.down ? 0 : 3 * Math.min(1, consumed / 200);
+    // how many small Parquet files appear per second depends on how the writer batches
+    const commits = off(lake) ? 0 : writer.files * Math.min(1, consumed / 200);
     let compacted = 0;
-    if (!lake.down) {
+    if (!off(lake)) {
       lake.storedGB += (parquetBytes * dt) / 1e9;
       lake.smallFiles += commits * dt;
       if (consumed > 1) lake.snapshots += dt;
@@ -578,17 +751,18 @@ export class Sim {
     const TR_CORES = 16;
     const TR_QMAX = 40;
     // Planning and opening every extra small file costs CPU: the "small files problem".
-    trino.cost = 2 + lake.smallFiles * 0.01; // core-seconds per query
+    const trTech = this.techOf('trino');
+    trino.cost = (2 + lake.smallFiles * 0.02) * trTech.costMul; // core-seconds per query
     const trCap = TR_CORES / trino.cost;
     let trServed = 0;
     trino.inRate = trQArr;
-    if (trino.down || lake.down) {
+    if (off(trino) || off(lake) || !E.has('trino>lake')) {
       trino.outRate = trino.util = trino.cpu = trino.bps = 0;
       trino.queue = 0;
-      trino.dropRate = trino.down ? 0 : trQArr;
-      trino.mem = trino.down ? 0 : 0.2;
+      trino.dropRate = off(trino) ? 0 : trQArr;
+      trino.mem = off(trino) ? 0 : 0.2;
       trino.latency = 0;
-      trino.status = trino.down ? 'Down. Ad-hoc queries on the lake fail; the data itself is safe in S3.' : 'Every query fails: the files it needs to read are in S3, which is unreachable.';
+      trino.status = off(trino) ? 'Down. Ad-hoc queries on the lake fail; the data itself is safe in S3.' : 'Every query fails: the files it needs to read are in S3, which is unreachable.';
     } else {
       trino.queue += trQArr * dt;
       const served = Math.min(trino.queue, trCap * dt);
@@ -615,7 +789,8 @@ export class Sim {
           : lake.smallFiles > 200
             ? 'Slowing down: the table has many small files, so every query spends longer planning and opening them.'
             : 'Healthy. Reads only the columns and files each query needs, straight from S3.';
-      this._stress(trino, trino.queue >= TR_QMAX * 0.98, trino.util, dt, 'out of memory (too many concurrent queries)');
+      if (trTech.noCrash) trino.stress = 0;
+      else this._stress(trino, trino.queue >= TR_QMAX * 0.98, trino.util, dt, 'out of memory (too many concurrent queries)');
     }
     trino.disk = 0.12;
 
@@ -623,47 +798,55 @@ export class Sim {
     lake.putRate = commits + compacted / 40;
     lake.getRate = trServed * (24 + lake.smallFiles * 0.2);
     lake.outRate = lake.getRate;
-    lake.ingestBytes = lake.down ? 0 : parquetBytes;
+    lake.ingestBytes = off(lake) ? 0 : parquetBytes;
     lake.files = Math.round(lake.bigFiles + lake.smallFiles);
-    lake.util = lake.down ? 0 : Math.min(0.95, lake.smallFiles / 800);
-    lake.bps = lake.down ? 0 : parquetBytes * 8 + trino.bps;
+    lake.util = off(lake) ? 0 : Math.min(0.95, lake.smallFiles / 330);
+    lake.bps = off(lake) ? 0 : parquetBytes * 8 + trino.bps;
     lake.cpu = lake.mem = lake.disk = 0;
-    lake.status = lake.down
+    lake.status = off(lake)
       ? 'S3 outage. Nothing is lost, but the writer cannot commit and no query can read.'
       : lake.smallFiles > 200
         ? `Small files problem: ${Math.round(lake.smallFiles)} tiny Parquet files are waiting to be merged. Every query has to open them all.`
         : p.compaction
           ? 'Healthy. Compaction keeps merging the small files each commit creates into large ones.'
-          : 'Compaction is off. Each commit adds three small files and nothing merges them.';
+          : 'Compaction is off. Every commit adds small files and nothing merges them.';
 
     // ---------- clickhouse ----------
     ch.inRate = produced;
-    if (!ch.down) {
+    if (!off(ch)) {
       const mergeRate = 6 * clamp(chFree / CH_CORES, 0.03, 1); // parts merged away per second
       const partsIn = inserted > 1 ? 1 + inserted / 2500 : 0; // each insert block lands as a new part
-      ch.parts = Math.max(12, ch.parts + (partsIn - mergeRate) * dt);
+      ch.parts = olap.parts ? Math.max(12, ch.parts + (partsIn - mergeRate) * dt) : 0;
       ch.insertRate = ease(ch.insertRate, inserted, dt, 0.2);
       ch.insertCap = chInsertCap;
       ch.outRate = ease(ch.outRate, chServed, dt, 0.2);
       ch.qCap = chQCap;
-      const insertCores = inserted / CH_ROWS_PER_CORE;
-      const mergeCores = Math.min(1.5, chFree * 0.25);
-      ch.util = (chQArr * CH_Q_COST + Math.min(produced, 9000) / CH_ROWS_PER_CORE + 1.5) / CH_CORES;
+      const insertCores = olap.shared ? inserted / CH_ROWS_PER_CORE : 0; // loading runs elsewhere on a warehouse
+      const mergeCores = olap.shared ? Math.min(1.5, chFree * 0.25) : 0;
+      ch.util = (chQArr * CH_Q_COST + (olap.shared ? Math.min(produced, 9000) / CH_ROWS_PER_CORE + 1.5 : 0)) / CH_CORES;
+      ch.qmax = CH_QMAX;
+      ch.partsModel = olap.parts;
+      ch.storedGB = ch.diskGB;
       ch.cpu = ease(ch.cpu, clamp((chServed * CH_Q_COST + insertCores + mergeCores) / CH_CORES), dt);
       ch.mem = ease(ch.mem, clamp(0.28 + 0.2 * ((chServed * CH_Q_COST) / CH_CORES) + 0.5 * (ch.queue / CH_QMAX)), dt);
       ch.diskGB += (inserted * EVENT_BYTES * dt) / 8 / 1e9; // ~8× columnar compression
-      ch.disk = clamp(ch.diskGB / SPECS.clickhouse.diskGB);
+      ch.disk = olap.managedDisk ? 0 : clamp(ch.diskGB / olap.spec.diskGB);
       ch.diskIO = (inserted * EVENT_BYTES * 4) / 8 + chServed * 5e6; // inserts + merge rewrites + scans
       ch.bps = inserted * EVENT_BYTES * 8 + chServed * 200e3 * 8;
-      ch.latency = 0.05 / clamp(chFree / CH_CORES, 0.08, 1) + ch.queue / chQCap;
+      ch.latency = olap.baseLat / clamp(chFree / CH_CORES, 0.08, 1) + ch.queue / chQCap;
       ch.status = ch.tooManyParts
         ? 'Too many parts: inserts created parts faster than background merges could combine them, so inserts are being throttled.'
         : chQArr >= chQCap
-          ? 'Query overload. Queries queue for CPU; ingestion and merges are starved, so dashboards show stale data.'
+          ? olap.shared
+            ? 'Query overload. Queries queue for CPU; ingestion and merges are starved, so dashboards show stale data.'
+            : 'Warehouse saturated. Queries wait in line for compute; loading is unaffected because it runs separately.'
           : kafka.lagCH > 2000
             ? 'Ingestion is behind: queries are using CPU that inserts need, or events are arriving faster than it can insert.'
-            : 'Healthy. Inserting from Kafka in batches and answering dashboard queries in milliseconds.';
-      this._stress(ch, ch.queue >= CH_QMAX * 0.98, chQArr / chQCap, dt, 'out of memory (too many concurrent queries)');
+            : olap.shared
+              ? 'Healthy. Inserting from Kafka in batches and answering dashboard queries in milliseconds.'
+              : `Healthy. Loading from Kafka about ${olap.ingestDelay}s behind real time; queries take around ${fmtDur(olap.baseLat)}.`;
+      if (olap.crash) this._stress(ch, ch.queue >= CH_QMAX * 0.98, chQArr / chQCap, dt, 'out of memory (too many concurrent queries)');
+      else ch.stress = 0;
     } else {
       ch.outRate = ch.insertRate = ch.util = ch.cpu = ch.mem = ch.bps = ch.diskIO = 0;
       ch.dropRate = chQArr;
@@ -673,35 +856,36 @@ export class Sim {
     // ---------- dashboards ----------
     bi.inRate = bi.outRate = qTotal;
     bi.util = clamp(qTotal / 250);
-    bi.cpu = bi.down ? 0 : 0.06 + 0.3 * bi.util;
-    bi.mem = bi.down ? 0 : 0.3;
+    bi.cpu = off(bi) ? 0 : 0.06 + 0.3 * bi.util;
+    bi.mem = off(bi) ? 0 : 0.3;
     bi.disk = 0.2;
     bi.bps = (chServed * 200e3 + trServed * 500e3) * 8;
-    bi.chLatency = ch.down ? Infinity : ch.latency;
-    bi.trLatency = trino.down || lake.down ? Infinity : trino.latency;
-    bi.freshCH = kafka.lagCH / Math.max(produced, 50);
+    bi.chLatency = off(ch) ? Infinity : ch.latency;
+    bi.trLatency = off(trino) || off(lake) ? Infinity : trino.latency;
+    bi.freshCH = olap.ingestDelay + kafka.lagCH / Math.max(produced, 50);
     bi.freshLake = kafka.lag / Math.max(produced, 50);
     bi.failRate = ch.dropRate + trino.dropRate;
-    bi.status = bi.down
+    bi.status = off(bi)
       ? 'Down. Nobody is looking at the data.'
       : bi.failRate > 0.5
         ? 'Queries are failing. Analysts see errors and spinning dashboards.'
         : bi.freshCH > 30
           ? `Dashboards load, but the numbers are ${fmtDur(bi.freshCH)} out of date because ingestion is behind.`
-          : 'Healthy. Real-time panels read ClickHouse; ad-hoc SQL goes through Trino to the lake.';
+          : `Healthy. Real-time panels read ${ch.label}; ad-hoc SQL goes through Trino to the lake.`;
 
     // ---------- queue + workers ----------
     const queue = N.queue;
     const worker = N.worker;
-    const JOB_FRAC = 0.15;
-    const Q_MAX = 20000;
-    const WORKER_RATE = 120;
-    const jobsIn = queue.down ? 0 : webServed * JOB_FRAC;
-    const workCap = worker.down ? 0 : p.workerCount * WORKER_RATE;
-    queue.inRate = webServed * JOB_FRAC;
+    const Q_MAX = this.techOf('queue').qmax;
+    const WORKER_RATE = 120 * this.techOf('worker').rateMul;
+    queue.qmax = Q_MAX;
+    worker.cap = p.workerCount * WORKER_RATE;
+    const jobsIn = jobsArr;
+    const workCap = off(worker) || !E.has('queue>worker') ? 0 : p.workerCount * WORKER_RATE;
+    queue.inRate = jobsArr;
     let jobsDone = 0;
-    let jobsDropped = queue.down ? queue.inRate : 0;
-    if (!queue.down) {
+    let jobsDropped = off(queue) ? queue.inRate : 0;
+    if (!off(queue)) {
       queue.queue += jobsIn * dt;
       jobsDone = Math.min(queue.queue / dt, workCap);
       queue.queue -= jobsDone * dt;
@@ -730,10 +914,10 @@ export class Sim {
     worker.inRate = worker.outRate = jobsDone;
     worker.util = workCap > 0 ? jobsIn / workCap : 0;
     worker.cpu = ease(worker.cpu, workCap > 0 ? clamp(0.03 + (jobsDone / workCap) * 0.97) : 0, dt);
-    worker.mem = worker.down ? 0 : 0.35 + 0.2 * worker.cpu;
+    worker.mem = off(worker) ? 0 : 0.35 + 0.2 * worker.cpu;
     worker.disk = 0.15;
     worker.bps = jobsDone * 50e3 * 8;
-    worker.status = worker.down
+    worker.status = off(worker)
       ? 'Down. The queue keeps accepting jobs but nothing drains it.'
       : worker.util > 1
         ? `All ${p.workerCount} workers are busy. Add workers to drain the queue faster.`
@@ -742,13 +926,16 @@ export class Sim {
     // network utilisation = bits on the wire ÷ link speed
     for (const id in N) {
       const node = N[id];
-      if (node.down) node.bps = node.diskIO = 0;
+      if (off(node)) node.bps = node.diskIO = 0;
+      // a component with no live connections does nothing
+      else if (node.type !== 'client' && !this.possibleEdges(id).some((e) => E.has(e.id) && e.other.active))
+        node.status = 'Not connected to anything. Use “Connect” to wire it to another component.';
       node.net = clamp(node.bps / NIC_BPS[node.type]);
     }
 
     // ---------- totals ----------
     const ok = cacheHits + dbReadOk + dbWriteOk;
-    const err = Math.max(0, incoming - lbOut) + webDrop + dbFail;
+    const err = Math.max(0, incoming - lbOut) + webDrop + dbFail + noRoute;
     const t = this.totals;
     t.in = ease(t.in, incoming, dt, 0.2);
     t.ok = ease(t.ok, ok, dt, 0.3);
@@ -759,23 +946,34 @@ export class Sim {
     // ---------- flows for the renderer ----------
     const f = this.flows;
     f['client>lb'] = incoming;
-    const perWebRead = alive.length ? reads / alive.length : 0;
-    const perWebWrite = alive.length ? writes / alive.length : 0;
     for (const w of this.webs) {
-      const up = w.active && !w.down;
-      f[`lb>${w.id}`] = up ? lbOut / alive.length : 0;
-      f[`${w.id}>cache`] = up && cacheUp ? perWebRead : 0;
-      f[`${w.id}>db`] = up ? perWebWrite + (cacheUp ? 0 : perWebRead) : 0;
-      f[`${w.id}>kafka`] = up ? w.outRate : 0;
-      f[`${w.id}>queue`] = up ? w.outRate * JOB_FRAC : 0;
+      f[`lb>${w.id}`] = alive.includes(w) ? lbOut / alive.length : 0;
+      f[`${w.id}>cache`] = w._cache;
+      f[`${w.id}>db`] = w._db;
+      f[`${w.id}>kafka`] = w._events;
+      f[`${w.id}>queue`] = w._jobs;
     }
-    f['cache>db'] = cacheUp ? dbReadsArr : 0;
+    f['cache>db'] = cacheToDb;
     f['kafka>consumer'] = consumed;
     f['kafka>clickhouse'] = inserted;
     f['consumer>lake'] = consumed;
-    f['bi>clickhouse'] = ch.down ? 0 : chQArr;
-    f['bi>trino'] = trino.down ? 0 : trQArr;
+    f['bi>clickhouse'] = off(ch) ? 0 : chQArr;
+    f['bi>trino'] = off(trino) ? 0 : trQArr;
     f['trino>lake'] = lake.getRate;
+
+    // Return traffic: '<' is a successful response travelling back, '!' is an error response.
+    const dbOkFrac = dbReadsArr + writes > 0 ? (dbReadOk + dbWriteOk) / (dbReadsArr + writes) : 0;
+    f['client>lb<'] = ok;
+    f['client>lb!'] = err;
+    for (const w of this.webs) {
+      f[`lb>${w.id}<`] = alive.includes(w) ? ok / alive.length : 0;
+      f[`${w.id}>cache<`] = f[`${w.id}>cache`];
+      f[`${w.id}>db<`] = f[`${w.id}>db`] * dbOkFrac;
+    }
+    f['cache>db<'] = cacheToDb * dbOkFrac;
+    f['bi>clickhouse<'] = chServed;
+    f['bi>trino<'] = trServed;
+    f['trino>lake<'] = lake.getRate;
     f['queue>worker'] = jobsDone;
 
     this._findBottleneck();

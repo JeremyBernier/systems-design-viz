@@ -23,3 +23,31 @@ Currently the data flow visualization only shows data from the client towards ou
 The job queue should show number of jobs.
 
 The stream consumer currently appears to be a sink, whereas in practice it would probably be doing something with the data and sending it to some sink. Update accordingly.
+
+The user should be able to place new components (eg. web server), and wire up connections between components if it is sensible.
+
+Database should use a specific database. For example, Postgres, MySQL, DynamoDb, BigTable, etc. We should also support ClickHouse, Snowflake, etc. We should differentiate between OLTP and OLAP databases.
+
+We ideally want to visualize costs as well. We can estimate ballpark costs using public pricing on for example AWS or Google Cloud
+
+We should have specific technologies for everything, and user should be able to customize the specific technology. For example, the web server could use EC2, Google Coud Run, a physical server, etc. The load balancer could be Nginx or something else.
+
+Look up the possible specific technologies for each component, and make it possible to be each component.
+
+- For cloud, only need to consider AWS and Google Cloud
+- For specific technologies, show an appropriate logo (eg. Postgres logo) and/or visual.
+
+---
+
+For cache, show <memory usage / memory capacity> in GB or TB or whatever the metric is.
+
+---
+
+The user should be able to select from preset systems, like Youtube and Instagram
+- Youtube https://www.hellointerview.com/learn/system-design/problem-breakdowns/youtube
+- Instagram https://www.hellointerview.com/learn/system-design/problem-breakdowns/instagram
+- Uber https://www.hellointerview.com/learn/system-design/problem-breakdowns/uber
+
+---
+
+When zooming in on a component (eg. AWS Athena), there should be a description telling me what the technology is

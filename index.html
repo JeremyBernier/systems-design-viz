@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>System Design Simulator</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="stage"></div>
+
+    <header id="hud">
+      <div class="brand">
+        <h1>System Design Simulator</h1>
+        <p>Turn up the traffic. Find the bottleneck. Break things.</p>
+      </div>
+      <div class="tiles">
+        <div class="tile"><span>Incoming</span><b id="t-in">0</b><small>req/s</small></div>
+        <div class="tile"><span>Served</span><b id="t-ok">0</b><small>req/s</small></div>
+        <div class="tile" id="tile-err"><span>Errors</span><b id="t-err">0%</b><small id="t-errs">0 req/s</small></div>
+        <div class="tile"><span>Bandwidth</span><b id="t-bw">0</b><small>through load balancer</small></div>
+        <div class="tile"><span>Latency</span><b id="t-lat">0</b><small>avg response</small></div>
+      </div>
+      <div class="chartbox">
+        <div class="legend" id="main-legend"></div>
+        <canvas id="main-chart"></canvas>
+      </div>
+    </header>
+
+    <aside id="controls" class="panel">
+      <h2>Traffic</h2>
+      <label class="row">
+        <span>Requests per second</span><b id="v-traffic"></b>
+        <input type="range" id="traffic" min="0" max="1000" step="1" />
+      </label>
+      <button id="spike" class="wide">⚡ Traffic spike (4× for 6s)</button>
+      <label class="row">
+        <span>Writes</span><b id="v-write"></b>
+        <input type="range" id="write" min="0" max="60" step="1" />
+      </label>
+
+      <h2>Architecture</h2>
+      <div class="row stepper"><span>Web servers</span><button data-step="webCount" data-d="-1" aria-label="Fewer web servers">−</button><b id="v-webCount"></b><button data-step="webCount" data-d="1" aria-label="More web servers">+</button></div>
+      <div class="row stepper"><span>Workers</span><button data-step="workerCount" data-d="-1" aria-label="Fewer workers">−</button><b id="v-workerCount"></b><button data-step="workerCount" data-d="1" aria-label="More workers">+</button></div>
+      <label class="row check"><input type="checkbox" id="cacheEnabled" /><span>Cache in front of database</span></label>
+      <label class="row check"><input type="checkbox" id="autoRestart" /><span>Auto-restart crashed nodes</span></label>
+
+      <h2>Analytics</h2>
+      <label class="row">
+        <span>Dashboard queries per second</span><b id="v-queries"></b>
+        <input type="range" id="queries" min="0" max="200" step="1" />
+      </label>
+      <label class="row check"><input type="checkbox" id="compaction" /><span>Iceberg compaction</span></label>
+
+      <div class="btns">
+        <button id="pause">Pause</button>
+        <button id="reset">Reset</button>
+      </div>
+
+      <h2>Traffic key</h2>
+      <ul class="key">
+        <li><i style="background: #3987e5"></i>HTTP requests</li>
+        <li><i style="background: #199e70"></i>Reads (cache lookups)</li>
+        <li><i style="background: #d95926"></i>Database queries</li>
+        <li><i style="background: #c98500"></i>Background jobs</li>
+        <li><i style="background: #9085e9"></i>Kafka events</li>
+        <li><i style="background: #d55181"></i>Analytics queries</li>
+        <li><i style="background: #e66767"></i>Rejected requests</li>
+      </ul>
+
+      <h2>Event log</h2>
+      <ol id="log"></ol>
+    </aside>
+
+    <aside id="detail" class="panel"></aside>
+
+    <div id="banner" hidden></div>
+    <div id="tooltip" hidden></div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

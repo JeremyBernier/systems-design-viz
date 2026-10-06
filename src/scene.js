@@ -489,7 +489,22 @@ export class Scene {
       ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
       ray.setFromCamera(ndc, this.camera);
     };
+    // the card floating over a component counts as part of it; cards ignore
+    // pointer events (so the floor stays draggable), so hit-test their boxes
+    const inCard = (e, id) => {
+      const r = this.nodes[id].el.getBoundingClientRect();
+      return r.width > 0 && e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+    };
+    const pickCard = (e) => {
+      // the hovered card is drawn on top, then later cards cover earlier ones
+      if (this.hoverId && inCard(e, this.hoverId)) return this.hoverId;
+      let found = null;
+      for (const id in this.nodes) if (inCard(e, id)) found = id;
+      return found;
+    };
     const pick = (e) => {
+      const card = pickCard(e);
+      if (card) return card;
       aim(e);
       const hit = ray.intersectObjects(this.hitMeshes.filter((m) => m.parent.visible))[0];
       return hit ? hit.object.userData.id : null;

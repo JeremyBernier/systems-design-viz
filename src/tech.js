@@ -501,6 +501,21 @@ export const TECH = {
 
 // ------------------------------------------------------------------ event-driven functions
 // limit: concurrent executions the platform allows · billed per invocation and per second of run time (1 GB)
+// ------------------------------------------------------------------ Kafka → warehouse connector
+// cap: rows/s its tasks can load. Only present when the chosen warehouse has `connector` set.
+TECH.connector = {
+  kconnect: {
+    name: 'Kafka Connect', vendor: 'Self-hosted', logo: badge('KC', '#231f20'), kind: 'Sink connector workers',
+    about: 'The standard framework for moving data out of Kafka. You run a small cluster of workers and load a sink plugin for the destination — Snowflake\'s connector (Snowpipe Streaming) or the BigQuery sink. Each task is a Kafka consumer that buffers rows and loads them in batches, committing its offset only after the warehouse accepts them.',
+    cap: 8000, cost: () => vm(0.192, 2), basis: 'Two m5.xlarge workers (4 vCPU, 16 GB) at $0.19/h each',
+  },
+};
+// How each warehouse gets its rows out of Kafka: by itself (`ingest`), or through the connector above.
+Object.assign(TECH.clickhouse.clickhouse, { ingest: 'its own Kafka table engine: consumer threads inside ClickHouse' });
+Object.assign(TECH.clickhouse.redshift, { ingest: 'Redshift streaming ingestion: a materialized view over the topic' });
+Object.assign(TECH.clickhouse.snowflake, { connector: { plugin: 'Snowflake Kafka connector (Snowpipe Streaming)', flush: 1 } });
+Object.assign(TECH.clickhouse.bigquery, { connector: { plugin: 'BigQuery sink connector (Storage Write API)', flush: 2 } });
+
 TECH.fn = {
   lambda: {
     name: 'AWS Lambda', vendor: 'AWS', logo: badge('λ', AWS), kind: 'Event-driven functions', serverless: true,
@@ -519,7 +534,7 @@ TECH.fn = {
 export const DEFAULT_TECH = {
   lb: 'nginx', web: 'ec2', cache: 'redis', db: 'postgres', queue: 'rabbitmq', worker: 'ec2',
   kafka: 'kafka', consumer: 'flink', lake: 's3iceberg', clickhouse: 'clickhouse', trino: 'trino', bi: 'grafana',
-  cdn: 'cloudfront', blob: 's3', fn: 'lambda',
+  cdn: 'cloudfront', blob: 's3', fn: 'lambda', connector: 'kconnect',
 };
 
 export { HOURS, SECONDS, GB };

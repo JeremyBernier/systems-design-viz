@@ -29,6 +29,7 @@ const HEIGHT = { client: 2.2, lb: 1.2, web: 2.3, cache: 1.2, db: 2.1, kafka: 1.5
 HEIGHT.cdn = 1.3;
 HEIGHT.blob = 1.4;
 HEIGHT.fn = 1.1;
+HEIGHT.connector = 1.1;
 // What each queue technology calls the same moving parts (used by the zoomed-in broker view).
 const QUEUE_TERMS = {
   rabbitmq: { entry: 'Exchange', queue: 'Queue', ready: 'ready', flight: 'Unacked', done: 'acks' },
@@ -167,6 +168,7 @@ export class Scene {
       cdn: [-10, -7.5],
       blob: [-5.5, -13.5],
       fn: [10, -12.5],
+      connector: [4, 17],
     };
     for (const id in this.sim.nodes) {
       const type = this.sim.nodes[id].type;
@@ -252,6 +254,11 @@ export class Scene {
         // a six-sided bucket of objects (the data lake's bucket is round)
         add(new THREE.CylinderGeometry(1.1, 0.8, 1.0, 6), shell(), 0, 0.6, 0);
         add(new THREE.CylinderGeometry(0.95, 0.95, 0.05, 6), glow(), 0, 1.12, 0);
+      } else if (type === 'connector') {
+        // a small adapter: two worker boxes bridged by a pipe
+        add(new THREE.BoxGeometry(0.7, 0.6, 0.9), shell(), -0.55, 0.4, 0);
+        add(new THREE.BoxGeometry(0.7, 0.6, 0.9), shell(), 0.55, 0.4, 0);
+        add(new THREE.BoxGeometry(1.5, 0.12, 0.2), glow(), 0, 0.76, 0);
       } else if (type === 'fn') {
         // a tray of small identical execution environments
         add(new THREE.BoxGeometry(2.2, 0.2, 1.6), shell(), 0, 0.2, 0);
@@ -396,6 +403,8 @@ export class Scene {
     add('client', 'cdn', FLOW.asset);
     add('cdn', 'blob', FLOW.asset);
     add('blob', 'fn', FLOW.job);
+    add('kafka', 'connector', FLOW.event);
+    add('connector', 'clickhouse', FLOW.event);
     add('queue', 'fn', FLOW.job);
   }
 
@@ -1319,6 +1328,7 @@ export class Scene {
       else if (n.type === 'kafka') stat = `${fmtRate(n.inRate)} msg/s · lag ${fmtRate(Math.max(n.lag, n.lagCH))}`;
       else if (n.type === 'lake') stat = `${fmtGB(n.storedGB)} · ${n.files.toLocaleString()} files`;
       else if (n.type === 'cdn') stat = `${fmtRate(n.inRate)} obj/s · ${Math.round(n.hit * 100)}% edge hits`;
+      else if (n.type === 'connector') stat = `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} rows/s`;
       else if (n.type === 'fn') stat = `${fmtRate(n.outRate)} invocations/s · ${n.concurrency.toFixed(n.concurrency < 10 ? 1 : 0)} concurrent`;
       else if (n.type === 'blob') stat = `${fmtGB(n.storedGB)} · ${fmtRate(n.outRate)} GET/s`;
       else if (n.type === 'clickhouse') stat = `OLAP · ${fmtRate(n.insertRate)} rows/s · ${fmtRate(n.outRate)} q/s`;

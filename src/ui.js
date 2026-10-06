@@ -44,6 +44,8 @@ const NOTES = {
   'blob.disk': 'Grows with every upload; you pay per GB-month',
   'blob.net': 'CDN cache misses and uploads (or every asset read when there is no CDN)',
   'fn.cpu': 'Share of the concurrency limit in use',
+  'connector.cpu': 'Decoding events and building batches',
+  'connector.mem': 'Rows buffered between flushes',
   'fn.net': 'Objects read from the bucket and results written back',
 };
 
@@ -707,6 +709,10 @@ export class UI {
         return [['Produced', `${fmtRate(n.inRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Consumed (2 groups)', r(n.outRate, 'msg/s')], ['Lag: lake writer', `${fmtRate(n.lag)} of ${fmtRate(n.retention || 0)} retained`], [`Lag: ${this.sim.nodes.clickhouse.label}`, `${fmtRate(n.lagCH)} of ${fmtRate(n.retention || 0)} retained`], ['Lag per partition', n.partitions.map((v) => fmtRate(v)).join(' · ')], ['Expired unread', r(n.expiredRate, 'msg/s')]];
       case 'consumer':
         return [['Reading from Kafka', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Raw events in', fmtBytes(n.outRate * p.eventBytes)], ['Behind by', `${fmtRate(this.sim.nodes.kafka.lag)} msgs`], ['Parquet out → data lake', fmtBytes(this.sim.nodes.lake.ingestBytes)], ['Small files written', `${this.sim.techOf('consumer').files} per second`]];
+      case 'connector': {
+        const wh = this.sim.nodes.clickhouse;
+        return [['Loading', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} rows/s`], ['Sink plugin', wh.tech.connector ? wh.tech.connector.plugin : '—'], ['Destination', wh.label], ['Unread in Kafka', `${fmtRate(this.sim.nodes.kafka.lagCH)} rows`], ['Batch flush interval', fmtDur(n.latency)]];
+      }
       case 'fn':
         return [['Invocations', r(n.outRate, '/s')], ['From upload events', `${n.upRate.toFixed(1)} /s`], ['From the job queue', this.sim.edges.has('queue>fn') ? r(n.jobRate, 'jobs/s') : 'not connected'], ['Concurrent executions', `${n.concurrency.toFixed(1)} of ${n.limit.toLocaleString()}`], ['Warm environments', n.warm.toFixed(1)], ['Cold starts', pct(n.coldPct)], ['Average duration', fmtDur(n.latency)], ['Throttled', r(n.dropRate, '/s')]];
       case 'queue':
@@ -714,7 +720,7 @@ export class UI {
       case 'lake':
         return [['Data stored', fmtGB(n.storedGB)], ['Parquet files', n.files.toLocaleString()], ['Small files awaiting compaction', Math.round(n.smallFiles).toLocaleString()], ['Ingest (compressed)', fmtBytes(n.ingestBytes)], ['Compression vs raw JSON', '6×'], ['S3 PUT requests', `${n.putRate.toFixed(1)} /s`], ['S3 GET requests', `${fmtRate(n.getRate)} /s`], ['Iceberg snapshots', Math.round(n.snapshots).toLocaleString()], ['Compaction', p.compaction ? 'on' : 'off']];
       case 'clickhouse':
-        return [['Inserting', `${fmtRate(n.insertRate)} of ${fmtRate(n.insertCap || 0)} rows/s max`], ['Ingestion lag', `${fmtRate(this.sim.nodes.kafka.lagCH)} rows`], ['Queries', `${n.outRate.toFixed(1)} of ${Math.round(n.qCap || 0)} /s`], ['Query latency', fmtDur(n.latency)], ['Queries waiting', `${Math.round(n.queue)} of ${n.qmax || 0}`], ['Active parts', n.partsModel ? `${Math.round(n.parts)} of 300` : 'n/a'], ['Data stored', fmtGB(n.storedGB || 0)], ['Rejected queries', `${n.dropRate.toFixed(1)} /s`], ['Crash risk', pct(n.stress)]];
+        return [['Reads Kafka through', n.tech.connector ? `Kafka Connect · ${n.tech.connector.plugin}` : n.tech.ingest || 'a built-in consumer'], ['Inserting', `${fmtRate(n.insertRate)} of ${fmtRate(n.insertCap || 0)} rows/s max`], ['Ingestion lag', `${fmtRate(this.sim.nodes.kafka.lagCH)} rows`], ['Queries', `${n.outRate.toFixed(1)} of ${Math.round(n.qCap || 0)} /s`], ['Query latency', fmtDur(n.latency)], ['Queries waiting', `${Math.round(n.queue)} of ${n.qmax || 0}`], ['Active parts', n.partsModel ? `${Math.round(n.parts)} of 300` : 'n/a'], ['Data stored', fmtGB(n.storedGB || 0)], ['Rejected queries', `${n.dropRate.toFixed(1)} /s`], ['Crash risk', pct(n.stress)]];
       case 'trino':
         return [['Queries', `${n.outRate.toFixed(1)} of ${(n.cap || 0).toFixed(1)} /s`], ['CPU per query', `${n.cost.toFixed(1)} core-seconds`], ['Query latency', n.latency ? fmtDur(n.latency) : '—'], ['Queries waiting', `${Math.round(n.queue)} of 40`], ['Files opened per query', Math.round(24 + this.sim.nodes.lake.smallFiles * 0.2)], ['Rejected queries', `${n.dropRate.toFixed(1)} /s`], ['Crash risk', pct(n.stress)]];
       case 'bi':

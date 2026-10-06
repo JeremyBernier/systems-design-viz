@@ -23,7 +23,9 @@ export const EDGE_TYPES = [
   ['cache', 'db'],
   ['queue', 'worker'],
   ['kafka', 'consumer'],
-  ['kafka', 'clickhouse'],
+  ['kafka', 'clickhouse'], // only for warehouses that consume from Kafka themselves
+  ['kafka', 'connector'], // otherwise a connector sits in between
+  ['connector', 'clickhouse'],
   ['consumer', 'lake'],
   ['bi', 'clickhouse'],
   ['bi', 'trino'],
@@ -74,6 +76,7 @@ export const NIC_BPS = { client: 10e9, lb: 10e9, web: 1e9, cache: 1e9, db: 1e9, 
 NIC_BPS.cdn = 400e9;
 NIC_BPS.blob = 100e9;
 NIC_BPS.fn = 10e9;
+NIC_BPS.connector = 1e9;
 // Connections that are possible but not made until the user asks: functions on the queue would hide what the workers teach.
 const OPTIONAL_EDGES = new Set(['queue>fn']);
 
@@ -95,6 +98,7 @@ export const SPECS = {
   cdn: { cores: 0, ramGB: 0, diskGB: 0 }, // the provider's edge network
   blob: { cores: 0, ramGB: 0, diskGB: 0 }, // managed object storage
   fn: { cores: 0, ramGB: 0, diskGB: 0 }, // serverless: no machine of yours
+  connector: { cores: 8, ramGB: 32, diskGB: 100 }, // two 4-vCPU Kafka Connect workers
 };
 
 export function fmtGB(gb) {
@@ -213,6 +217,12 @@ export const NODE_INFO = {
   },
 };
 
+NODE_INFO.connector = {
+  title: 'Connector',
+  kind: 'Kafka → warehouse sink',
+  about:
+    'Some warehouses cannot read Kafka themselves, so a separate process does it for them: it consumes the topic as its own consumer group, buffers rows for a second or two, and loads each batch through the warehouse\'s ingest API. It is one more thing to run, pay for and monitor — if it stops, the warehouse silently goes stale while everything else looks healthy. ClickHouse and Redshift need none: they consume from Kafka with a built-in engine.',
+};
 NODE_INFO.fn = {
   title: 'Functions',
   kind: 'Event-driven serverless functions',
@@ -304,6 +314,7 @@ export class Sim {
     n.cdn = makeNode('cdn', 'cdn', { warm: 1, hitRatio: 0, hit: 0, missRate: 0, edgeBytes: 0, storedGB: 0 });
     n.blob = makeNode('blob', 'blob', { objects, storedGB: (objects * this.params.assetKB) / 1e6, putRate: 0, getRate: 0 });
     this.assets = newAssetStats();
+    n.connector = makeNode('connector', 'connector');
     n.fn = makeNode('fn', 'fn', { warm: 0, concurrency: 0, coldPct: 0, upRate: 0, jobRate: 0, limit: 0 });
     this.nodes = n;
     for (const type in this.params.tech) this.setTech(type, this.params.tech[type], true);
@@ -318,6 +329,7 @@ export class Sim {
     this.history = {};
     this._histAcc = 0;
     initReliability(this); // percentiles, retries and SLO state (latency.js)
+    this._syncConnector();
   }
 
   // Rebuild the system from a preset: components, technologies and traffic shape.
@@ -326,6 +338,7 @@ export class Sim {
     this.reset();
     while (this.webCount < preset.webs) this.setActive(this.webs.find((w) => !w.active).id, true);
     for (const id of preset.remove) this.nodes[id].active = false;
+    this._syncConnector();
   }
 
   techOf(type) {
@@ -347,6 +360,7 @@ export class Sim {
       if (type === 'db') node.diskUsed = 0.35;
       if (type === 'clickhouse') Object.assign(node, { parts: t.parts ? 20 : 0, tooManyParts: false });
     }
+    if (type === 'clickhouse') this._syncConnector();
     if (!quiet) this.emit('log', 'good', `${NODE_INFO[type].title} is now ${t.name}`);
   }
 
@@ -354,13 +368,34 @@ export class Sim {
   possibleEdges(id) {
     const node = this.nodes[id];
     const out = [];
-    for (const [a, b] of EDGE_TYPES)
+    const viaConnector = !!this.techOf('clickhouse').connector;
+    for (const [a, b] of EDGE_TYPES) {
+      if (a === 'connector' || b === 'connector' ? !viaConnector : viaConnector && a === 'kafka' && b === 'clickhouse') continue;
       for (const oid in this.nodes) {
         const o = this.nodes[oid];
         if (node.type === a && o.type === b) out.push({ id: `${id}>${oid}`, other: o, out: true });
         if (node.type === b && o.type === a) out.push({ id: `${oid}>${id}`, other: o, out: false });
       }
+    }
     return out;
+  }
+
+  // A warehouse either consumes from Kafka with a built-in engine (direct link) or needs a
+  // connector in between. Keep the connector, and the wiring through it, in step with the choice.
+  _syncConnector() {
+    const c = this.nodes.connector;
+    const E = this.edges;
+    if (!c || !E) return;
+    const need = !!this.techOf('clickhouse').connector;
+    const direct = 'kafka>clickhouse';
+    const via = ['kafka>connector', 'connector>clickhouse'];
+    const wired = E.has(direct) || via.every((e) => E.has(e));
+    for (const e of [direct, ...via]) E.delete(e);
+    const on = need && this.nodes.clickhouse.active && this.nodes.kafka.active;
+    if (c.active !== on) c.queue = c.stress = c.inRate = c.outRate = c.util = 0;
+    c.active = on;
+    if (!on) c.down = false;
+    if (wired) for (const e of need ? via : [direct]) E.add(e);
   }
 
   // Returns the edge id if these two components can be wired together, else null.
@@ -386,6 +421,7 @@ export class Sim {
     node.queue = node.stress = node.outRate = node.inRate = node.dropRate = node.util = 0;
     if (node.type === 'cache') node.warm = 0;
     if (on) for (const e of this.possibleEdges(id)) wired && !OPTIONAL_EDGES.has(e.id) ? this.edges.add(e.id) : this.edges.delete(e.id);
+    if (node.type === 'clickhouse' || node.type === 'kafka') this._syncConnector();
     this.emit('log', on ? 'good' : 'warn', `${node.label} ${on ? 'added' : 'removed'}`);
   }
 
@@ -405,7 +441,7 @@ export class Sim {
     const seen = {};
     for (const id in this.nodes) {
       const n = this.nodes[id];
-      if (!n.active && !seen[n.type]) seen[n.type] = n;
+      if (!n.active && !seen[n.type] && (n.type !== 'connector' || this.techOf('clickhouse').connector)) seen[n.type] = n;
     }
     return Object.values(seen);
   }
@@ -792,8 +828,15 @@ export class Sim {
       chFree = Math.max(0, CH_CORES - chServed * CH_Q_COST);
       if (ch.parts > CH_PARTS_LIMIT) ch.tooManyParts = true;
       else if (ch.parts < CH_PARTS_LIMIT / 2) ch.tooManyParts = false;
-      chInsertCap = (olap.shared ? Math.min(olap.insertMax, chFree * 0.75 * CH_ROWS_PER_CORE) : olap.insertMax) * (ch.tooManyParts ? 0.1 : 1) * (E.has('kafka>clickhouse') ? 1 : 0);
+      chInsertCap = (olap.shared ? Math.min(olap.insertMax, chFree * 0.75 * CH_ROWS_PER_CORE) : olap.insertMax) * (ch.tooManyParts ? 0.1 : 1);
     }
+    // ---------- kafka → warehouse: built-in engine, or through the connector ----------
+    const conn = N.connector;
+    const viaConn = !!olap.connector;
+    const CONN_CAP = this.techOf('connector').cap;
+    const connUp = viaConn && !off(conn) && E.has('kafka>connector') && E.has('connector>clickhouse');
+    const whCap = chInsertCap; // what the warehouse itself could load
+    chInsertCap = viaConn ? (connUp ? Math.min(chInsertCap, CONN_CAP) : 0) : E.has('kafka>clickhouse') ? chInsertCap : 0;
 
     // Each consumer group keeps its own position in the log, so each has its own lag.
     let expired = 0;
@@ -810,6 +853,21 @@ export class Sim {
     };
     const consumed = consume('lag', off(consumer) || off(lake) || !E.has('kafka>consumer') || !E.has('consumer>lake') ? 0 : CONSUME_CAP);
     const inserted = consume('lagCH', chInsertCap);
+    conn.cap = CONN_CAP;
+    conn.inRate = conn.outRate = viaConn ? inserted : 0;
+    conn.util = connUp ? Math.min(produced, CONN_CAP * 2) / CONN_CAP : 0;
+    conn.cpu = ease(conn.cpu, connUp ? clamp(0.05 + (inserted / CONN_CAP) * 0.9) : 0, dt);
+    conn.mem = off(conn) ? 0 : 0.3 + 0.3 * clamp(inserted / CONN_CAP); // rows buffered between flushes
+    conn.disk = 0.1;
+    conn.bps = inserted * EVENT_BYTES * 8 * 2; // read from Kafka, written to the warehouse
+    conn.latency = olap.connector ? olap.connector.flush : 0;
+    conn.status = off(conn)
+      ? `Down. ${ch.label} gets no new rows and its dashboards go stale, while Kafka keeps the events until it returns.`
+      : !connUp
+        ? 'Not wired between the event stream and the warehouse, so nothing is being loaded.'
+        : CONN_CAP < whCap && produced > CONN_CAP
+          ? `At its limit: its tasks load ${fmtRate(CONN_CAP)} rows/s and events arrive faster, so lag builds in Kafka. Real fixes: more tasks, more topic partitions.`
+          : `Healthy. Consuming the topic and loading ${ch.label} in batches every ~${conn.latency}s.`;
     const maxLag = Math.max(kafka.lag, kafka.lagCH);
     if (!off(kafka)) {
       kafka.expiredRate = ease(kafka.expiredRate, expired / dt, dt, 0.2);
@@ -978,7 +1036,7 @@ export class Sim {
     bi.bps = (chServed * 200e3 + trServed * 500e3) * 8;
     bi.chLatency = off(ch) ? Infinity : ch.latency;
     bi.trLatency = off(trino) || off(lake) ? Infinity : trino.latency;
-    bi.freshCH = olap.ingestDelay + kafka.lagCH / Math.max(produced, 50);
+    bi.freshCH = olap.ingestDelay + conn.latency + kafka.lagCH / Math.max(produced, 50);
     bi.freshLake = kafka.lag / Math.max(produced, 50);
     bi.failRate = ch.dropRate + trino.dropRate;
     bi.status = off(bi)
@@ -1088,7 +1146,8 @@ export class Sim {
     }
     f['cache>db'] = cacheToDb;
     f['kafka>consumer'] = consumed;
-    f['kafka>clickhouse'] = inserted;
+    f['kafka>clickhouse'] = viaConn ? 0 : inserted;
+    f['kafka>connector'] = f['connector>clickhouse'] = viaConn ? inserted : 0;
     f['consumer>lake'] = consumed;
     f['bi>clickhouse'] = off(ch) ? 0 : chQArr;
     f['bi>trino'] = off(trino) ? 0 : trQArr;

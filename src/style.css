@@ -170,6 +170,19 @@ p {
   color: var(--text-2);
   font-size: 12px;
 }
+.credit {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.credit a {
+  color: var(--text-2);
+  text-decoration: none;
+  pointer-events: auto;
+}
+.credit a:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
 .tiles {
   display: flex;
   gap: 22px;

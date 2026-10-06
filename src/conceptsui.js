@@ -18,9 +18,12 @@ export function initConceptsUI() {
   document.body.append(dlg);
   let tab = THEMES[0].id;
 
+  // a trade-off between two options, row by row
+  const versus = (v) => `<div class="dg-scroll"><table class="dg-table cc-versus"><thead><tr><th></th><th>${v.a}</th><th>${v.b}</th></tr></thead><tbody>${v.rows.map(([k, a, b]) => `<tr><th>${k}</th><td>${a}</td><td>${b}</td></tr>`).join('')}</tbody></table></div>`;
   const topic = (t) => `<section class="dg-concept" id="cc-${t.id}">
       <h2>${t.title}</h2><p class="dg-one">${t.one}</p>
       ${t.what.map((p) => `<p class="d-about">${p}</p>`).join('')}
+      ${t.versus ? versus(t.versus) : ''}${t.choose ? `<div class="cc-choose"><b>Which to choose</b>${list(t.choose)}</div>` : ''}
       <div class="dg-pc">${t.pros.length ? `<div class="dg-pro"><b>What it gets you</b>${list(t.pros)}</div>` : ''}<div class="dg-con"><b>${t.pros.length ? 'What it costs you' : 'Why it hurts'}</b>${list(t.cons)}</div></div>
       <p class="dg-try${t.sim ? '' : ' none'}"><b>In the simulator:</b> ${t.sim || 'Not modelled here.'}</p>
     </section>`;

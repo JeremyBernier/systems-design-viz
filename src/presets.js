@@ -17,6 +17,7 @@ const ASSETS = {
   youtube: { assetsPerReq: 1.5, assetKB: 1500, assetObjects: 2e8, uploadPct: 5, uploadKB: 40000 }, // 300 TB of segments; an upload is stored in several renditions
   instagram: { assetsPerReq: 4, assetKB: 200, assetObjects: 5e8, uploadPct: 10, uploadKB: 3000 }, // 100 TB; each post is kept in several sizes
   jobs: { assetsPerReq: 0, assetKB: 20, assetObjects: 1e4, uploadPct: 0, uploadKB: 100 }, // an API, not a website
+  adclicks: { assetsPerReq: 0, assetKB: 20, assetObjects: 1e4, uploadPct: 0, uploadKB: 100 }, // a redirect endpoint serves no assets
   uber: { assetsPerReq: 0.5, assetKB: 30, assetObjects: 1e6, uploadPct: 1, uploadKB: 300 },
 };
 
@@ -87,5 +88,17 @@ export const PRESETS = {
     tech: { lb: 'alb', web: 'ec2', db: 'dynamodb', queue: 'sqs', worker: 'ec2', scheduler: 'watcher' },
     remove: ['cache', 'cdn', 'blob', 'fn', 'kafka', 'consumer', 'lake', 'clickhouse', 'trino', 'bi'],
     add: ['scheduler'],
+  },
+  adclicks: {
+    name: 'Ad Click Aggregator',
+    names: { web: 'Click Service', cache: 'Ad Lookup Cache', db: 'Ads DB', kafka: 'Click Stream', consumer: 'Raw Click Archiver', lake: 'Raw Click Lake', clickhouse: 'Click Aggregates', trino: 'Reconciliation Queries', bi: 'Advertiser Dashboards' },
+    blurb: 'Counts ad clicks for live dashboards (the last 5 minutes, hour and day) and for billing. A click hits a stateless click service, which looks up the advertiser\'s URL in a cache, appends the click to Kafka and redirects; nothing else is on the user\'s path. ClickHouse reads the stream and keeps per-minute counts that dashboards sum into each window. Every raw click is also archived to a lake, so the counts can be recomputed for billing. A 1:2 scale model of 10,000 clicks a second. The full walkthrough, starting from scoping, is under Learn → System designs.',
+    missing: 'Not modelled: deduplication by impression ID, windows and watermarks, two-stage aggregation for a viral ad, and the nightly job that overwrites counts from the archive. Here every click is unique, on time and evenly spread across ads.',
+    params: { traffic: 5000, writePct: 1, workerCount: 1, queryRate: 40, ...ASSETS.adclicks },
+    // a click is a tiny request: verify, look up one URL, append, redirect; nearly every lookup is a cache hit
+    workload: { reqBytes: 1e3, eventBytes: 500, cacheHitRatio: 0.98, jobFrac: 0, svcTime: 0.005, webRps: 2500 },
+    webs: 4,
+    tech: { lb: 'alb', web: 'ec2', cache: 'redis', db: 'postgres', kafka: 'kafka', consumer: 'firehose', lake: 's3iceberg', clickhouse: 'clickhouse', trino: 'trino', bi: 'superset' },
+    remove: ['queue', 'worker', 'fn', 'cdn', 'blob'],
   },
 };

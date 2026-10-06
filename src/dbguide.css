@@ -91,6 +91,18 @@
   font-weight: 600;
   white-space: nowrap;
 }
+/* a guide that is its own page (quiz.html) sits in the row as a link, dressed like the buttons */
+#learnbar a {
+  padding: 5px 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text);
+  text-decoration: none;
+  background: var(--surface-2);
+  border: 1px solid var(--axis);
+  border-radius: 6px;
+}
+#learnbar a:hover,
 #learnbar button:hover {
   border-color: #9085e9;
   background: rgb(144 133 233 / 0.18);
@@ -127,4 +139,109 @@ h3 .learn-tag {
   font-size: 12px;
   background: var(--surface-2);
   border-radius: 3px;
+}
+
+/* a two-option trade-off table inside a concept, and the advice that follows it */
+.cc-versus {
+  max-width: 900px;
+  margin: 10px 0 4px;
+}
+.cc-versus th,
+.cc-versus td {
+  white-space: normal;
+}
+.cc-versus tbody th {
+  width: 24%;
+  color: var(--text-2);
+  font-weight: 600;
+}
+.cc-versus td {
+  width: 38%;
+}
+.cc-choose {
+  max-width: 78ch;
+  margin: 10px 0;
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.45;
+}
+.cc-choose > b {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.cc-choose ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.cc-choose li {
+  margin: 4px 0;
+}
+.cc-choose li b {
+  color: var(--text);
+}
+
+/* Flink deep dive: the numbered walk through a checkpoint */
+#flink {
+  width: min(1040px, calc(100vw - 32px));
+}
+.fl-steps {
+  max-width: 78ch;
+  margin: 6px 0 10px;
+  padding-left: 22px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.fl-steps li {
+  margin: 5px 0;
+  padding-left: 4px;
+}
+.fl-steps li::marker {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* System designs */
+#designs {
+  width: min(1080px, calc(100vw - 32px));
+}
+.ds-table {
+  max-width: 980px;
+  margin: 8px 0;
+}
+.ds-table th,
+.ds-table td {
+  white-space: normal;
+}
+.ds-table tbody th {
+  width: 22%;
+  color: var(--text);
+  font-weight: 600;
+}
+.ds-list {
+  max-width: 78ch;
+  margin: 6px 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.ds-list li {
+  margin: 5px 0;
+}
+.ds-list b {
+  color: var(--text);
+}
+.ds-load {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 4px 0 0;
+}
+.ds-load button {
+  padding: 8px 16px;
 }

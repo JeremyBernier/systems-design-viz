@@ -10,6 +10,8 @@ import { initCompareUI, tradeHTML } from './compareui.js';
 import { initBuildUI } from './buildui.js';
 import { initConceptsUI } from './conceptsui.js';
 import { initKafkaUI } from './kafkaui.js';
+import { initFlinkUI } from './flinkui.js';
+import { initDesignsUI } from './designsui.js';
 import { DATA_STEP, MAX_REPLICAS, SHARD_STEPS, MAX_CACHE_NODES, CACHE_NODE_CAP } from './datatier.js';
 import { fmtTTL } from './cdn.js';
 import { RETRY_POLICIES, SLO_TARGETS } from './latency.js';
@@ -295,8 +297,10 @@ export class UI {
     // --- model your own system: workload assumptions, pricing model, capacity planner (modelui.js)
     initModelUI(this, sim);
     initDbGuide(this, sim);
-    initNumbers(sim);
+    initNumbers(sim); // the Numbers dialog in the Learn row (numbers.js); its quiz is quiz.html
     initConceptsUI(); // the Core concepts guide in the Learn row (conceptsui.js)
+    initDesignsUI(); // worked system designs in the Learn row (designsui.js)
+    initFlinkUI(); // the Flink deep dive in the Learn row (flinkui.js)
     initKafkaUI(); // the Kafka deep dive: Learn row, and the event stream's detail panel (kafkaui.js)
     initBuildUI(this, sim); // the Build button, component picker and placing hint (buildui.js)
     initCompareUI(this, sim); // trade-offs and the side-by-side technology comparison (compareui.js)

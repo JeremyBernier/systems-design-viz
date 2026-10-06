@@ -113,3 +113,18 @@ h3 .learn-tag {
 #banner {
   bottom: 68px;
 }
+
+/* Core concepts guide */
+#concepts {
+  width: min(1000px, calc(100vw - 32px));
+}
+.dg-try.none {
+  border-left-color: var(--axis);
+  color: var(--muted);
+}
+.dg-body code {
+  padding: 1px 4px;
+  font-size: 12px;
+  background: var(--surface-2);
+  border-radius: 3px;
+}

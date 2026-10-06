@@ -8,6 +8,7 @@ import { initDbGuide } from './dbguide.js';
 import { initNumbers } from './numbers.js';
 import { initCompareUI, tradeHTML } from './compareui.js';
 import { initBuildUI } from './buildui.js';
+import { initConceptsUI } from './conceptsui.js';
 import { DATA_STEP, MAX_REPLICAS, SHARD_STEPS, MAX_CACHE_NODES, CACHE_NODE_CAP } from './datatier.js';
 import { fmtTTL } from './cdn.js';
 import { RETRY_POLICIES, SLO_TARGETS } from './latency.js';
@@ -294,6 +295,7 @@ export class UI {
     initModelUI(this, sim);
     initDbGuide(this, sim);
     initNumbers(sim);
+    initConceptsUI(); // the Core concepts guide in the Learn row (conceptsui.js)
     initBuildUI(this, sim); // the Build button, component picker and placing hint (buildui.js)
     initCompareUI(this, sim); // trade-offs and the side-by-side technology comparison (compareui.js)
 

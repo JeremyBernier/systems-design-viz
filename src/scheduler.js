@@ -19,7 +19,8 @@ export function scheduler(sim, dt, queueUp, ease) {
   const { scheduler: s, db, queue } = sim.nodes;
   const E = sim.edges;
   const t = s.tech;
-  s.cap = t.cap;
+  const cap = t.cap * (s.tierF || 1); // more than one scheduler: their capacities add up (tier.js)
+  s.cap = cap;
   s.window = t.window;
   if (!s.active) {
     s.aheadJobs = s.missed = s.inRate = s.outRate = s.util = s.cpu = s.mem = s.bps = s.lateRate = 0;
@@ -30,7 +31,7 @@ export function scheduler(sim, dt, queueUp, ease) {
   const canPush = E.has('scheduler>queue') && queueUp;
   // phase 1: read upcoming executions — today's, a bit extra to refill the look-ahead, and anything overdue
   const want = due * (s.aheadJobs < t.window * due ? 1.5 : 1) + (s.missed > 0 ? due * (CATCHUP - 1) : 0);
-  let fetched = canFetch ? Math.min(t.cap, want) * dt : 0;
+  let fetched = canFetch ? Math.min(cap, want) * dt : 0;
   const reads = (fetched / dt) * READ_COST;
   const lateOut = canPush ? Math.min(s.missed, fetched) : 0; // overdue ones go out at once
   s.missed -= lateOut;
@@ -47,8 +48,8 @@ export function scheduler(sim, dt, queueUp, ease) {
   s.lateRate = ease(s.lateRate, lateOut / dt, dt, 0.3);
   s.dropRate = 0;
   s.stress = 0;
-  s.util = s.down ? 0 : due / t.cap;
-  s.cpu = ease(s.cpu, s.down ? 0 : Math.min(1, 0.04 + 0.9 * (s.inRate / t.cap)), dt);
+  s.util = s.down ? 0 : due / cap;
+  s.cpu = ease(s.cpu, s.down ? 0 : Math.min(1, 0.04 + 0.9 * (s.inRate / cap)), dt);
   s.mem = s.down ? 0 : 0.25;
   s.disk = 0.1;
   s.bps = s.down ? 0 : (s.inRate + s.outRate) * 1e3 * 8;
@@ -65,7 +66,7 @@ export function scheduler(sim, dt, queueUp, ease) {
       : !canPush
         ? 'Cannot reach the queue. Due jobs are piling up as overdue.'
         : s.util > 1
-          ? `Overloaded: ${Math.round(due).toLocaleString()} jobs fall due each second and it can schedule ${t.cap.toLocaleString()}. The overdue pile only grows.`
+          ? `Overloaded: ${Math.round(due).toLocaleString()} jobs fall due each second and it can schedule ${cap.toLocaleString()}. The overdue pile only grows.`
           : s.missed > due * 0.5
             ? `Catching up: ${Math.round(s.missed).toLocaleString()} overdue jobs are being enqueued at ${CATCHUP}× the normal rate. They run late, and the burst lands on the workers.`
             : s.delay > SLA_SECS

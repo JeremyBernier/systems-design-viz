@@ -475,6 +475,45 @@ export class UI {
     else this.onConnectMode(mode === 'connect');
   }
 
+  // Ask before removing a component (from the trash can beside it, or the panel's Remove button).
+  confirmRemove(id) {
+    const node = this.sim.nodes[id];
+    if (!node || !node.active || node.type === 'client') return;
+    let dlg = $('confirm');
+    if (!dlg) {
+      dlg = document.createElement('dialog');
+      dlg.id = 'confirm';
+      dlg.innerHTML = '<h3></h3><p></p><div class="btns"><button data-no>Cancel</button><button data-yes class="danger">Remove</button></div>';
+      document.body.append(dlg);
+      dlg.addEventListener('keydown', (e) => e.key === 'Escape' && e.stopPropagation()); // Esc cancels the question only
+      dlg.addEventListener('click', (e) => {
+        if (e.target === dlg || e.target.closest('[data-no]')) return dlg.close();
+        if (!e.target.closest('[data-yes]')) return;
+        dlg.close();
+        const n = this.sim.nodes[dlg.dataset.id];
+        if (!n || !n.active) return;
+        const name = n.label;
+        this.sim.setActive(n.id, false);
+        this.onSelect(null);
+        this.syncControls();
+        this.toast(`${name} removed. Add it again from Build.`);
+      });
+    }
+    const tier = node.type !== 'web' && this.sim.nodes[node.extraOf || node.type].tierN > 1;
+    const lastWeb = node.type === 'web' && this.sim.webCount === 1;
+    dlg.dataset.id = id;
+    dlg.querySelector('h3').textContent = `Remove ${node.label}?`;
+    dlg.querySelector('p').textContent = tier
+      ? 'The others of its kind keep running and take over its share of the load.'
+      : lastWeb
+        ? 'It is the only one left: with nothing to run your code, every request will fail. You can add it again from Build.'
+        : node.type === 'web'
+          ? 'The remaining servers take over its traffic. You can add it again from Build.'
+          : 'Its connections go with it, and anything that depended on it will start failing. You can add it again from Build.';
+    dlg.showModal();
+    dlg.querySelector('[data-no]').focus(); // the safe choice is the default
+  }
+
   toast(msg, kind = 'ok') {
     const t = $('toast');
     t.textContent = msg;
@@ -657,7 +696,7 @@ export class UI {
     this._connSig = null;
     if (TECH[node.type])
       $('d-engine').addEventListener('change', (e) => {
-        this.sim.setTech(node.type, e.target.value);
+        this.sim.setTech(node.type, e.target.value, false, id); // an extra tier member changes alone
         this.select(id);
       });
     $('d-back').addEventListener('click', () => this.onSelect(null));
@@ -691,11 +730,7 @@ export class UI {
       act.append(kill);
       const rm = document.createElement('button');
       rm.textContent = 'Remove';
-      rm.addEventListener('click', () => {
-        this.sim.setActive(id, false);
-        this.onSelect(null);
-        this.syncControls();
-      });
+      rm.addEventListener('click', () => this.confirmRemove(id));
       act.append(rm);
       if (node.type === 'db') {
         const add = document.createElement('button');

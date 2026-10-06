@@ -97,8 +97,12 @@
 }
 .bd-card em {
   grid-column: 2;
+  margin-top: 3px;
   font-style: normal;
-  font-size: 11px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.bd-card small {
   color: var(--muted);
 }
 #place-hint {
@@ -122,4 +126,61 @@
   #build-open {
     top: 92px;
   }
+}
+
+.bd-body h4 {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.bd-body h2 + h4 {
+  margin-top: 2px;
+}
+.bd-body h4 span {
+  margin-left: 6px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* trash can under the magnifying glass, and the question it asks */
+.trash-btn {
+  background: var(--surface-2);
+  border-color: var(--critical);
+  color: #fff;
+  cursor: pointer;
+}
+.trash-btn:hover {
+  background: var(--critical);
+}
+#confirm {
+  width: min(420px, calc(100vw - 32px));
+  padding: 18px 20px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--axis);
+  border-radius: 10px;
+}
+#confirm::backdrop {
+  background: rgb(0 0 0 / 0.6);
+}
+#confirm h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+#confirm p {
+  margin: 0 0 4px;
+  color: var(--text-2);
+  line-height: 1.45;
+}
+#confirm .btns {
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+#confirm .btns button {
+  flex: none;
+  min-width: 88px;
+}
+#confirm button.danger {
+  background: rgb(208 59 59 / 0.25);
 }

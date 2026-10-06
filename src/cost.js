@@ -1,15 +1,23 @@
 // Ballpark monthly cost of the running system. Per-technology prices live in tech.js.
 import { SECONDS, GB, priced } from './tech.js';
 import { fleetBasis } from './datatier.js';
+import { share } from './tier.js';
 
 const EGRESS_PER_GB = 0.09; // data transfer out to the internet
 const RESPONSE_BYTES = 15e3; // of the 20 kB per request, ~15 kB is the response leaving the cloud
+
+// every figure on a node that grows with its load
+const FLOWS = ['inRate', 'outRate', 'bps', 'readRate', 'writeRate', 'insertRate', 'getRate', 'putRate', 'concurrency', 'upRate', 'jobRate', 'edgeBytes', 'fillBytes', 'diskIO', 'load'];
 
 // → { monthly, basis } for one node
 export function nodeCost(sim, node) {
   if (!node.tech) return { monthly: 0, basis: 'Not your infrastructure' };
   // the pricing model discounts instance-hours only; priced() says whether this node had any
-  const { monthly, model } = priced(node, sim.params);
+  // one of several sharing a load (tier.js): bill it for its share of the traffic, not the whole tier's
+  const part = share(sim, node);
+  const billed = part < 1 ? { ...node } : node;
+  if (part < 1) for (const f of FLOWS) if (typeof billed[f] === 'number') billed[f] *= part;
+  const { monthly, model } = priced(billed, sim.params);
   return { monthly, basis: node.tech.basis + fleetBasis(node) + (model ? ` · ${model.name}: −${Math.round((1 - model.mul) * 100)}% on instance-hours` : '') };
 }
 

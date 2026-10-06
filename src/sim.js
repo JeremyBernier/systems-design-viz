@@ -3,6 +3,7 @@ import { DATA_DEFAULTS, CACHE_NODE_CAP, partialLoss, heal, cacheCluster, cacheSt
 import { ASSET_DEFAULTS, newAssetStats, assetTraffic, addAssetLoad } from './cdn.js';
 import { fnJobCapacity, functions } from './functions.js';
 import { SCHED_DEFAULTS, scheduler } from './scheduler.js';
+import { makeExtras, extrasOf, liveExtra, tierFactors, mirror, mirrorTiers } from './tier.js';
 import { initReliability, reliability, recordReliability } from './latency.js';
 import { AUTO_PARAMS, trafficShape, scaleWeb, scaleWorkers } from './autoscale.js';
 
@@ -317,8 +318,9 @@ export class Sim {
       spotWorkers: false, // run worker VMs on spot capacity (changes cost only)
       ...DATA_DEFAULTS, // dbReplicas, dbShards, cacheNodes (datatier.js)
       ...SCHED_DEFAULTS, // schedRate (scheduler.js)
+      extraTech: {}, // technology of each extra tier member, by node id (tier.js)
     };
-    this.listeners = { crash: [], recover: [], log: [] };
+    this.listeners = { crash: [], recover: [], log: [], swap: [] };
     Object.assign(this.params, ASSET_DEFAULTS); // static asset / media profile, see cdn.js
     this.reset();
   }
@@ -365,10 +367,16 @@ export class Sim {
     n.scheduler = makeNode('scheduler', 'scheduler', { aheadJobs: 0, missed: 0, aheadSecs: 0, lateRate: 0, delay: 0 });
     n.scheduler.active = false; // an optional building block: only some systems run jobs on a schedule
     n.fn = makeNode('fn', 'fn', { warm: 0, concurrency: 0, coldPct: 0, upRate: 0, jobRate: 0, limit: 0 });
+    makeExtras(n, makeNode); // spare members for every tier, off until the user adds one (tier.js)
     this.nodes = n;
     for (const type in this.params.tech) this.setTech(type, this.params.tech[type], true);
+    for (const id in n) {
+      if (!n[id].extraOf) continue;
+      this._applyTech(n[id], TECH[n[id].type][this.params.extraTech[id] || this.params.tech[n[id].type]]);
+      mirror(n[n[id].extraOf], n[id]); // so it has every figure its kind of component reports, from the start
+    }
     // every sensible connection starts wired up
-    for (const id in n) if (n[id].type !== 'web') n[id].label = this.roleName(n[id].type);
+    for (const id in n) if (n[id].type !== 'web') n[id].label = this.roleName(n[id].type) + (n[id].extraOf ? ' ' + n[id].slot : '');
     this.edges = new Set();
     for (const id in n) for (const e of this.possibleEdges(id)) if (!OPTIONAL_EDGES.has(e.id)) this.edges.add(e.id);
     this.time = 0;
@@ -391,7 +399,7 @@ export class Sim {
   // Rebuild the system from a preset: components, technologies and traffic shape.
   applyPreset(preset) {
     this.names = preset.names || {};
-    Object.assign(this.params, WORKLOAD, DATA_DEFAULTS, SCHED_DEFAULTS, preset.params, preset.workload, preset.data, { tech: { ...DEFAULT_TECH, ...preset.tech } });
+    Object.assign(this.params, WORKLOAD, DATA_DEFAULTS, SCHED_DEFAULTS, preset.params, preset.workload, preset.data, { tech: { ...DEFAULT_TECH, ...preset.tech }, extraTech: {} });
     this.reset();
     while (this.webCount < preset.webs) this.setActive(this.webs.find((w) => !w.active).id, true);
     for (const id of preset.remove) this.nodes[id].active = false;
@@ -404,14 +412,22 @@ export class Sim {
   }
 
   // Swap the concrete technology behind every component of one kind.
-  setTech(type, key, quiet = false) {
+  // `only` names one extra tier member (tier.js) to change by itself; otherwise the whole kind changes.
+  setTech(type, key, quiet = false, only = null) {
     const t = TECH[type] && TECH[type][key];
     if (!t) return;
+    const one = only && this.nodes[only] && this.nodes[only].extraOf ? this.nodes[only] : null;
+    if (one) {
+      this.params.extraTech = { ...this.params.extraTech, [one.id]: key };
+      this._applyTech(one, t);
+      if (!quiet) this.emit('log', 'good', `${one.label} is now ${t.name}`);
+      return;
+    }
     this.params.tech[type] = key;
     for (const id in this.nodes) {
       const node = this.nodes[id];
-      if (node.type !== type) continue;
-      Object.assign(node, { tech: t, kind: t.kind, about: t.about, spec: t.spec || null, serverless: !!t.serverless, managedDisk: !!t.managedDisk, restartSecs: t.restart || 8 });
+      if (node.type !== type || node.extraOf) continue;
+      this._applyTech(node, t);
       node.queue = node.stress = 0;
       if (type === 'db') node.diskUsed = 0.35;
       if (type === 'clickhouse') Object.assign(node, { parts: t.parts ? 20 : 0, tooManyParts: false });
@@ -420,15 +436,35 @@ export class Sim {
     if (!quiet) this.emit('log', 'good', `${this.roleName(type)} is now ${t.name}`);
   }
 
+  _applyTech(node, t) {
+    Object.assign(node, { tech: t, kind: t.kind, about: t.about, spec: t.spec || null, serverless: !!t.serverless, managedDisk: !!t.managedDisk, restartSecs: t.restart || 8 });
+  }
+
+  // The first member of a tier is the one the simulation computes on, so it must be the last to
+  // go. When it is the one killed or removed, it trades places with a surviving extra first.
+  _swap(p, e) {
+    const [pk, ek] = [this.params.tech[p.type], this.params.extraTech[e.id] || this.params.tech[p.type]];
+    if (pk !== ek) {
+      this.params.tech[p.type] = ek;
+      this.params.extraTech = { ...this.params.extraTech, [e.id]: pk };
+      this._applyTech(p, TECH[p.type][ek]);
+      this._applyTech(e, TECH[p.type][pk]);
+      if (p.type === 'clickhouse') this._syncConnector();
+    }
+    this.emit('swap', p.id, e.id);
+  }
+
   // Every connection this node could have, as { id: 'from>to', other, out }.
   possibleEdges(id) {
     const node = this.nodes[id];
     const out = [];
+    if (node.extraOf) return out; // an extra tier member has no wiring of its own: it shares its tier's
     const viaConnector = !!this.techOf('clickhouse').connector;
     for (const [a, b] of EDGE_TYPES) {
       if (a === 'connector' || b === 'connector' ? !viaConnector : viaConnector && a === 'kafka' && b === 'clickhouse') continue;
       for (const oid in this.nodes) {
         const o = this.nodes[oid];
+        if (o.extraOf) continue;
         if (node.type === a && o.type === b) out.push({ id: `${id}>${oid}`, other: o, out: true });
         if (node.type === b && o.type === a) out.push({ id: `${oid}>${id}`, other: o, out: false });
       }
@@ -472,6 +508,18 @@ export class Sim {
   setActive(id, on, wired = true) {
     const node = this.nodes[id];
     if (node.active === on) return;
+    if (!on && !node.extraOf && node.type !== 'web') {
+      // removing the first member of a tier: an extra takes its place and is removed instead
+      const e = extrasOf(this, node.type).find((x) => x.active);
+      if (e) {
+        this._swap(node, e);
+        return this.setActive(e.id, false);
+      }
+    }
+    if (on && node.extraOf) {
+      this._applyTech(node, TECH[node.type][this.params.extraTech[id] || this.params.tech[node.type]]);
+      mirror(this.nodes[node.extraOf], node);
+    }
     node.active = on;
     node.down = false;
     node.queue = node.stress = node.outRate = node.inRate = node.dropRate = node.util = 0;
@@ -514,7 +562,15 @@ export class Sim {
   kill(id, reason = 'Killed manually') {
     const node = this.nodes[id];
     if (!node || node.down || !node.active) return;
-    if (partialLoss(this, node, reason)) return; // a cache cluster or replicated database loses one machine, not the whole tier
+    if (!node.extraOf && partialLoss(this, node, reason)) return; // a cache cluster or replicated database loses one machine, not the whole tier
+    if (!node.extraOf && node.type !== 'web') {
+      // another member of the tier is still up: this one goes down and the tier carries on (tier.js)
+      const e = liveExtra(this, node.type);
+      if (e) {
+        this._swap(node, e);
+        return this.kill(e.id, reason);
+      }
+    }
     if (node.lostNodes || node.failover) node.lostNodes = node.failover = 0; // the whole tier is gone and restarts as one
     node.down = true;
     node.downFor = 0;
@@ -571,6 +627,7 @@ export class Sim {
 
     const E = this.edges;
     const off = (n) => n.down || !n.active; // crashed or not in the diagram
+    const F = tierFactors(this); // capacity multiplier of each tier: 1 unless the user added more of a kind (tier.js)
     const JOB_FRAC = p.jobFrac; // share of requests that enqueue a background job
     // workload assumptions are params: these shadow the module-level defaults for the whole step
     const REQ_BYTES = p.reqBytes;
@@ -594,7 +651,7 @@ export class Sim {
 
     // ---------- load balancer ----------
     const lb = N.lb;
-    const LB_CAP = this.techOf('lb').cap;
+    const LB_CAP = this.techOf('lb').cap * F.lb;
     lb.cap = LB_CAP;
     lb.inRate = incoming;
     const alive = this.webs.filter((w) => !off(w) && E.has(`lb>${w.id}`));
@@ -728,7 +785,7 @@ export class Sim {
 
     // ---------- cache ----------
     const reads = cacheLookups;
-    const CACHE_CAP = CACHE_NODE_CAP * cacheCluster(this, dt); // per node × nodes up
+    const CACHE_CAP = CACHE_NODE_CAP * cacheCluster(this, dt) * F.cache; // per node × nodes up
     if (cacheUp) {
       const served = reads;
       // warms up as traffic repopulates it (~10s at normal load)
@@ -785,8 +842,8 @@ export class Sim {
       if (db.readOnly) dbFail += writes;
       dbFail += tier.failW; // writes to a shard whose primary is being replaced
       const units = dbReadsArr + wArr * WRITE_COST;
-      DB_CAP = tier.cap;
-      DB_QMAX = tier.qmax;
+      DB_CAP = tier.cap * F.db;
+      DB_QMAX = tier.qmax * F.db;
       db.queue += units * dt;
       const servedU = Math.min(db.queue, DB_CAP * dt);
       db.queue -= servedU;
@@ -848,10 +905,10 @@ export class Sim {
     const ch = N.clickhouse;
     const trino = N.trino;
     const bi = N.bi;
-    const KAFKA_CAP = this.techOf('kafka').cap;
+    const KAFKA_CAP = this.techOf('kafka').cap * F.kafka;
     const RETENTION = this.techOf('kafka').retention; // unread messages kept
     const writer = this.techOf('consumer');
-    const CONSUME_CAP = writer.cap;
+    const CONSUME_CAP = writer.cap * F.consumer;
     kafka.cap = KAFKA_CAP;
     kafka.retention = RETENTION;
     consumer.cap = CONSUME_CAP;
@@ -866,7 +923,7 @@ export class Sim {
 
     // ClickHouse shares one CPU budget: queries take what they need, inserts and merges get what is left.
     const olap = this.techOf('clickhouse');
-    const CH_CORES = olap.cores;
+    const CH_CORES = olap.cores * F.clickhouse;
     const CH_Q_COST = olap.qCost; // core-seconds per dashboard query
     const CH_ROWS_PER_CORE = 1500;
     const CH_QMAX = olap.qmax;
@@ -889,12 +946,12 @@ export class Sim {
       chFree = Math.max(0, CH_CORES - chServed * CH_Q_COST);
       if (ch.parts > CH_PARTS_LIMIT) ch.tooManyParts = true;
       else if (ch.parts < CH_PARTS_LIMIT / 2) ch.tooManyParts = false;
-      chInsertCap = (olap.shared ? Math.min(olap.insertMax, chFree * 0.75 * CH_ROWS_PER_CORE) : olap.insertMax) * (ch.tooManyParts ? 0.1 : 1);
+      chInsertCap = (olap.shared ? Math.min(olap.insertMax * F.clickhouse, chFree * 0.75 * CH_ROWS_PER_CORE) : olap.insertMax * F.clickhouse) * (ch.tooManyParts ? 0.1 : 1);
     }
     // ---------- kafka → warehouse: built-in engine, or through the connector ----------
     const conn = N.connector;
     const viaConn = !!olap.connector;
-    const CONN_CAP = this.techOf('connector').cap;
+    const CONN_CAP = this.techOf('connector').cap * F.connector;
     const connUp = viaConn && !off(conn) && E.has('kafka>connector') && E.has('connector>clickhouse');
     const whCap = chInsertCap; // what the warehouse itself could load
     chInsertCap = viaConn ? (connUp ? Math.min(chInsertCap, CONN_CAP) : 0) : E.has('kafka>clickhouse') ? chInsertCap : 0;
@@ -988,7 +1045,7 @@ export class Sim {
     // Planning and opening every extra small file costs CPU: the "small files problem".
     const trTech = this.techOf('trino');
     trino.cost = (2 + lake.smallFiles * 0.02) * trTech.costMul; // core-seconds per query
-    const trCap = TR_CORES / trino.cost;
+    const trCap = (TR_CORES / trino.cost) * F.trino;
     let trServed = 0;
     trino.inRate = trQArr;
     if (off(trino) || off(lake) || !E.has('trino>lake')) {
@@ -1111,12 +1168,12 @@ export class Sim {
     // ---------- queue + workers ----------
     const queue = N.queue;
     const worker = N.worker;
-    const Q_MAX = this.techOf('queue').qmax;
+    const Q_MAX = this.techOf('queue').qmax * F.queue;
     const WORKER_RATE = p.jobRate * this.techOf('worker').rateMul;
     queue.qmax = Q_MAX;
-    worker.cap = p.workerCount * WORKER_RATE;
+    worker.cap = p.workerCount * WORKER_RATE * F.worker;
     const jobsIn = jobsArr;
-    const workCap = off(worker) || !E.has('queue>worker') ? 0 : p.workerCount * WORKER_RATE;
+    const workCap = off(worker) || !E.has('queue>worker') ? 0 : p.workerCount * WORKER_RATE * F.worker;
     // functions wired to the queue poll it too; one job holds one execution environment as long as it holds a worker core
     const JOB_SECS = WORKER_RATE > 0 ? SPECS.worker.cores / WORKER_RATE : 0.03;
     const fnCap = fnJobCapacity(this, dt, JOB_SECS);
@@ -1177,7 +1234,7 @@ export class Sim {
       const node = N[id];
       if (off(node)) node.bps = node.diskIO = 0;
       // a component with no live connections does nothing
-      else if (node.type !== 'client' && !this.possibleEdges(id).some((e) => E.has(e.id) && e.other.active))
+      else if (node.type !== 'client' && !node.extraOf && !this.possibleEdges(id).some((e) => E.has(e.id) && e.other.active))
         node.status = 'Not connected to anything. Use “Connect” to wire it to another component.';
       node.net = clamp(node.bps / NIC_BPS[node.type]);
     }
@@ -1235,6 +1292,7 @@ export class Sim {
     f['scheduler>queue'] = N.scheduler.outRate;
     f['blob>fn'] = N.fn.upRate;
 
+    mirrorTiers(this); // extra tier members show their tier's figures (tier.js)
     this._findBottleneck();
 
     this._histAcc += dt;

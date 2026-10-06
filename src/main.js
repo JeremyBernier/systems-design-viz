@@ -30,11 +30,13 @@ const applyPreset = (preset) => {
 const scene = new Scene(document.getElementById('stage'), sim, {
   onSelect: select,
   onZoom: (id) => zoom(true, id),
+  onRemove: (id) => ui.confirmRemove(id),
   onPlace: (id, pt) => {
     sim.setActive(id, true, false);
     scene.placeAt(id, pt);
     ui.setMode(null);
-    ui.toast(`${sim.nodes[id].label} placed. It is not connected to anything yet — use “Connect components”.`);
+    const n = sim.nodes[id];
+    ui.toast(n.extraOf ? `${n.tech.name} added as another ${sim.roleName(n.type)}. It shares that tier's load and connections, and covers for the other if one goes down.` : `${n.label} placed. It is not connected to anything yet — use “Connect components”.`);
     select(id);
   },
   onConnect: (a, b) => {
@@ -71,6 +73,12 @@ const ui = new UI(sim, {
 
 let booted = false;
 sim.on('crash', (node) => booted && scene.explode(node.id));
+// two members of a tier traded places: move their boxes, and keep the user looking at the same box
+sim.on('swap', (a, b) => {
+  scene.swap(a, b);
+  if (ui.selected === a) select(b);
+  else if (ui.selected === b) select(a);
+});
 
 // Fixed-step simulation, variable-rate rendering.
 const STEP = 1 / 30;

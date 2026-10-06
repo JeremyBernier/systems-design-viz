@@ -23,7 +23,7 @@ export function fnJobCapacity(sim, dt, jobSecs) {
   fn._ups = fn._upConc = 0;
   if (off(fn)) return 0;
   // environments that exist or can be created in time
-  const avail = Math.min(fn.tech.limit, fn.warm + BURST * dt);
+  const avail = Math.min(fn.tech.limit * (fn.tierF || 1), fn.warm + BURST * dt);
   fn._ups = E.has('blob>fn') && !off(blob) ? blob.putRate : 0;
   fn._upConc = Math.min(avail, fn._ups * UPLOAD_SECS);
   return E.has('queue>fn') && !off(queue) ? (avail - fn._upConc) / jobSecs : 0;
@@ -33,7 +33,7 @@ export function fnJobCapacity(sim, dt, jobSecs) {
 export function functions(sim, dt, fnJobs, jobSecs, ease) {
   const fn = sim.nodes.fn;
   const p = sim.params;
-  const limit = (fn.limit = fn.tech.limit);
+  const limit = (fn.limit = fn.tech.limit * (fn.tierF || 1)); // more than one of them: their limits add up (tier.js)
   fn.stress = 0; // nothing of yours to crash
   fn.disk = 0;
   if (off(fn)) {

@@ -72,7 +72,8 @@ const tmpS = new THREE.Vector3();
 const tmpC = new THREE.Color();
 
 export class Scene {
-  constructor(container, sim, { onSelect, onZoom, onPlace, onConnect }) {
+  constructor(container, sim, { onSelect, onZoom, onRemove, onPlace, onConnect }) {
+    this.onRemove = onRemove;
     this.onZoom = onZoom;
     this.selectedId = null; // highlighted in the overview; zooming in (focusId) is a separate step
     this.onPlace = onPlace;
@@ -127,6 +128,15 @@ export class Scene {
     this.zoomBtn.hidden = true;
     this.zoomBtn.addEventListener('click', () => this.selectedId && this.onZoom(this.selectedId));
     this.labelLayer.appendChild(this.zoomBtn);
+    // and a trash can under it: asks before removing the selected component
+    this.trashBtn = document.createElement('button');
+    this.trashBtn.className = 'zoom-btn trash-btn';
+    this.trashBtn.title = 'Remove';
+    this.trashBtn.setAttribute('aria-label', 'Remove the selected component');
+    this.trashBtn.innerHTML = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>';
+    this.trashBtn.hidden = true;
+    this.trashBtn.addEventListener('click', () => this.selectedId && this.onRemove(this.selectedId));
+    this.labelLayer.appendChild(this.trashBtn);
     container.appendChild(this.labelLayer);
 
     this._buildNodes();
@@ -336,8 +346,17 @@ export class Scene {
       v.hit = hit;
       this.hitMeshes.push(hit);
 
+      const of = this.sim.nodes[id].extraOf; // an extra member of a tier starts just beside the first one
       if (fixed[id]) v.target.set(fixed[id][0], 0, fixed[id][1]);
+      else if (of && fixed[of]) v.target.set(fixed[of][0] + 2.4, 0, fixed[of][1] + 2.9 * (this.sim.nodes[id].slot - 1));
       else v.target.set(-1.5, 0, 0);
+      if (of) {
+        // a tie back to the tier it belongs to, since it has no connections of its own
+        v.bond = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]), new THREE.LineDashedMaterial({ color: 0x898781, dashSize: 0.35, gapSize: 0.25 }));
+        v.bond.frustumCulled = false;
+        v.bond.visible = false;
+        this.scene.add(v.bond);
+      }
       v.home = v.target.clone();
       group.position.copy(v.target);
 
@@ -378,6 +397,20 @@ export class Scene {
     }
     this._layoutWebs();
     for (const id in this.nodes) this.nodes[id].group.position.copy(this.nodes[id].target);
+  }
+
+  // Two members of a tier trade places (the simulation keeps the first member alive: see tier.js).
+  swap(a, b) {
+    const [A, B] = [this.nodes[a], this.nodes[b]];
+    for (const k of ['target', 'home']) {
+      const t = A[k].clone();
+      A[k].copy(B[k]);
+      B[k].copy(t);
+    }
+    const p = A.group.position.clone();
+    A.group.position.copy(B.group.position);
+    B.group.position.copy(p);
+    [A.manual, B.manual] = [B.manual, A.manual];
   }
 
   // Put a component at a spot the user chose.
@@ -1189,6 +1222,18 @@ export class Scene {
       }
     }
 
+    for (const id in this.nodes) {
+      const v = this.nodes[id];
+      if (!v.bond) continue;
+      const to = this.nodes[sim.nodes[id].extraOf];
+      v.bond.visible = sim.nodes[id].active && to.group.visible && !this.focusId;
+      if (!v.bond.visible) continue;
+      const bp = v.bond.geometry.attributes.position;
+      bp.setXYZ(0, v.group.position.x, 0.12, v.group.position.z);
+      bp.setXYZ(1, to.group.position.x, 0.12, to.group.position.z);
+      bp.needsUpdate = true;
+      v.bond.computeLineDistances();
+    }
     this.ghost.visible = !!(this.placing && this.cursor);
     if (this.ghost.visible) this.ghost.position.set(this.cursor.x, 0.1, this.cursor.z);
     const from = this.connecting && this.connectFrom && this.nodes[this.connectFrom];
@@ -1360,7 +1405,9 @@ export class Scene {
       const x = (tmpV.x * 0.5 + 0.5) * this.container.clientWidth + zv.el.offsetWidth / 2 + 6;
       const y = (-tmpV.y * 0.5 + 0.5) * this.container.clientHeight - zv.el.offsetHeight / 2;
       this.zoomBtn.style.transform = `translate(0,-50%) translate(${x.toFixed(1)}px,${y.toFixed(1)}px)`;
+      this.trashBtn.style.transform = `translate(0,-50%) translate(${x.toFixed(1)}px,${(y + 40).toFixed(1)}px)`;
     }
+    this.trashBtn.hidden = !zShow || zv.type === 'client'; // the users are not yours to remove
     for (const key in this.rigLabels) {
       const el = this.rigLabels[key];
       el.hidden = !this.rig.visible;

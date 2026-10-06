@@ -9,6 +9,7 @@ import { initNumbers } from './numbers.js';
 import { initCompareUI, tradeHTML } from './compareui.js';
 import { initBuildUI } from './buildui.js';
 import { initConceptsUI } from './conceptsui.js';
+import { initKafkaUI } from './kafkaui.js';
 import { DATA_STEP, MAX_REPLICAS, SHARD_STEPS, MAX_CACHE_NODES, CACHE_NODE_CAP } from './datatier.js';
 import { fmtTTL } from './cdn.js';
 import { RETRY_POLICIES, SLO_TARGETS } from './latency.js';
@@ -296,6 +297,7 @@ export class UI {
     initDbGuide(this, sim);
     initNumbers(sim);
     initConceptsUI(); // the Core concepts guide in the Learn row (conceptsui.js)
+    initKafkaUI(); // the Kafka deep dive: Learn row, and the event stream's detail panel (kafkaui.js)
     initBuildUI(this, sim); // the Build button, component picker and placing hint (buildui.js)
     initCompareUI(this, sim); // trade-offs and the side-by-side technology comparison (compareui.js)
 
@@ -670,7 +672,7 @@ export class UI {
         node.tech
           ? `<h2>What is ${node.tech.name}?</h2><p class="d-about">${node.tech.about}</p>${
               node.tech.about !== info.about ? `<h2>Its role here: ${info.title}</h2><p class="d-about">${info.about}</p>` : ''
-            }` + (node.type === 'db' || node.type === 'clickhouse' ? `<button id="d-guide" class="wide" data-type="${node.type}">📖 Compare databases and their tradeoffs</button>` : '')
+            }` + (node.type === 'db' || node.type === 'clickhouse' ? `<button id="d-guide" class="wide" data-type="${node.type}">📖 Compare databases and their tradeoffs</button>` : '') + (['kafka', 'consumer', 'connector'].includes(node.type) ? '<button id="d-kafka" class="wide">📨 Kafka deep dive: partitions, offsets, keys</button>' : '')
           : `<h2>What it is</h2><p class="d-about">${info.about}</p>`
       }
       ${tradeHTML(node)}

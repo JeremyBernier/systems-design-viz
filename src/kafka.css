@@ -1,0 +1,117 @@
+/* Kafka deep dive (kafkaui.js). The dialog frame, topics and quiz styles are shared: .dlg, .dg-*, .nm-*. */
+#kafka {
+  width: min(1040px, calc(100vw - 32px));
+}
+.kf-rules {
+  max-width: 78ch;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--text-2);
+}
+.kf-rules li {
+  margin: 8px 0;
+  line-height: 1.45;
+}
+.kf-rules b {
+  color: var(--text);
+}
+.kf-bad {
+  color: var(--serious);
+}
+.kf-play {
+  max-width: 78ch;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+.kf-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.kf-pick span {
+  min-width: 96px;
+}
+.kf-pick button {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.kf-bars {
+  display: grid;
+  gap: 4px;
+  margin: 12px 0;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.kf-bar {
+  display: grid;
+  grid-template-columns: 26px 1fr 44px;
+  align-items: center;
+  gap: 8px;
+}
+.kf-bar div {
+  position: relative;
+  height: 12px;
+  border-radius: 3px;
+  background: var(--surface);
+}
+.kf-bar i {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.kf-bar i[data-hot='true'] {
+  background: var(--serious);
+}
+/* where a perfectly even share would end */
+.kf-bar u {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--text-2);
+}
+.kf-facts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin: 10px 0;
+}
+.kf-facts div {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--surface);
+  border-left: 3px solid var(--good);
+  font-size: 12px;
+  color: var(--text-2);
+}
+.kf-facts div[data-ok='false'] {
+  border-left-color: var(--serious);
+}
+.kf-facts b {
+  display: block;
+  font-size: 17px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.kf-verdict {
+  margin: 0;
+  color: var(--text);
+  line-height: 1.45;
+}
+.kf-quiz {
+  max-width: 68ch;
+  margin: 0 0 22px;
+}
+@media (max-width: 640px) {
+  .kf-facts {
+    grid-template-columns: 1fr;
+  }
+}

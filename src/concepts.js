@@ -1,5 +1,5 @@
 // Content for the "Core concepts" guide (conceptsui.js): the ideas that come up in every system
-// design whatever the technology. Four themes, each a handful of topics. A topic says what the idea
+// design whatever the technology. Five themes, each a handful of topics. A topic says what the idea
 // is, what it gets you and costs you, and where this simulator shows it, if it does.
 //
 // General knowledge, written to be read next to the simulator. `sim` is null where the idea is
@@ -231,6 +231,7 @@ export const THEMES = [
         what: [
           '<b>Two-phase commit</b> asks every participant to prepare and promise it can commit, then tells them all to do so. It gives a true all-or-nothing result, but every participant holds locks while waiting, and if the coordinator fails at the wrong moment they are stuck holding them.',
           'A <b>saga</b> gives up all-or-nothing. It is a sequence of local transactions, each with a <b>compensating action</b> that undoes it: reserve the seat, charge the card, issue the ticket; if the charge fails, release the seat. Nothing is locked across services, but for a while the world is in a half-finished state that other requests can see, and every step and every undo must be idempotent.',
+          'Both, and the alternatives to them (the transactional outbox, reserve-then-confirm, and designing the need away), are covered in depth under <b>Changing several systems</b>.',
         ],
         pros: ['Two-phase commit: real atomicity across systems', 'Sagas: no cross-service locks, and each service stays independent'],
         cons: ['Two-phase commit: slow, and blocks everyone if the coordinator fails', 'Sagas: intermediate states are visible, and some actions cannot truly be undone'],
@@ -247,6 +248,138 @@ export const THEMES = [
         pros: ['A log gives one order that every reader agrees on'],
         cons: ['A single ordered log is also a single place every write must pass through', 'Ordering across several logs or partitions is not defined'],
         sim: 'The event stream here keeps order only within one of its three partitions, which is why its panel reports lag per partition.',
+      },
+      {
+        id: 'watermarks',
+        title: 'Watermarks and checkpoints',
+        one: 'Two markers of progress in a stream processor. A watermark says how complete the input is; a checkpoint says where to restart after a crash.',
+        what: [
+          'A stream never ends, so a job that counts "views per minute" must decide when a minute is finished. Events carry the time they happened (<b>event time</b>) but arrive late and out of order: a phone that was in a tunnel uploads its 12:00 events at 12:07. A <b>watermark</b> is the processor\'s running estimate that "everything up to time T has now arrived", usually the newest event time seen minus an allowance for lateness. When the watermark passes 12:01, the 12:00 window is closed and its result is emitted.',
+          'A watermark is a guess, and the allowance is the trade. Too small and events arriving after their window has closed are dropped, or force a correction to a result already published. Too large and every result waits that much longer. One quiet input also holds everything back, because the watermark can only move as fast as the slowest partition.',
+          'A <b>checkpoint</b> answers a different question: what happens when the processor dies. Every so often it saves a consistent snapshot of its state (the half-built counts) together with its position in the input log. After a crash it loads the last snapshot, rewinds the input to that position and replays. Each event then affects the state exactly once, though anything already written downstream is written again unless the sink is idempotent or commits together with the checkpoint.',
+          'They are independent, and a correct job needs both. Watermarks are about <b>time</b> and matter even if nothing ever fails; checkpoints are about <b>failure</b> and matter even if every event arrives in order. The words are reused elsewhere: a database checkpoint is the same idea applied to the write-ahead log, while Kafka\'s "high watermark" is something else, the last offset copied to every in-sync replica.',
+        ],
+        pros: ['Watermarks: results grouped by when things happened, not by when they arrived', 'Checkpoints: a crash costs a replay, not the state or the events'],
+        cons: ['Watermarks: a larger lateness allowance is more complete and slower; a smaller one is faster and drops stragglers', 'Checkpoints: frequent ones slow normal processing; rare ones mean a long replay after a crash', 'Replay repeats output, so the sink has to cope with duplicates'],
+        sim: 'Watermarks are not modelled: every event here arrives on time and in order. Recovery from a checkpoint is. Select the lake writer and kill it: its position in the event stream stops moving and lag builds. Restart it and it carries on from where it stopped and works the backlog off, losing nothing unless it was down for longer than the stream keeps its events.',
+      },
+    ],
+  },
+  {
+    id: 'crossing',
+    name: 'Changing several systems',
+    intro: 'One action often has to change two things that do not share a transaction: two databases, a database and a queue, your service and a payment provider. Either both changes should happen or neither, and no single system is in a position to guarantee it.',
+    topics: [
+      {
+        id: 'dualwrite',
+        title: 'The dual-write problem',
+        one: 'Write to two systems one after the other, and a crash in between leaves them disagreeing.',
+        what: [
+          'A service saves an order to its database and then publishes an "order created" event to a queue. If it crashes after the first step, the order exists and nobody downstream ever hears of it. Swap the steps and the failure swaps too: the event is out, and the order was never saved.',
+          'No ordering of the two writes fixes this, and neither does retrying: the process that would retry is the one that died. The same shape appears whenever one action touches two systems: debit one account and credit another in a different database, charge a card and mark the order paid, update a row and invalidate a cache.',
+          'Everything else under this heading is a way out. They differ in what they give up: speed and availability (two-phase commit), isolation (sagas), immediacy (the outbox), or the need for the second system at all.',
+        ],
+        pros: [],
+        cons: ['The two systems drift apart silently: nothing fails loudly', 'Rare under normal operation, so it survives testing', 'Found weeks later as "missing" emails, shipments or ledger entries'],
+        sim: 'The shape is here, though its failure is not modelled: an application server writes to the database and also puts a job on the queue, as two separate calls.',
+      },
+      {
+        id: 'twopc',
+        title: 'Two-phase commit',
+        one: 'A coordinator asks every participant to promise it can commit, and only then tells them all to do it.',
+        what: [
+          '<b>Phase 1, prepare.</b> The coordinator sends each participant its part of the work. Each one does everything short of committing: it writes the changes to its log, takes the locks, and checks its constraints. Then it votes yes or no. A yes is a <b>promise</b>: from that moment the participant may not abort on its own, even if it crashes and restarts.',
+          '<b>Phase 2, commit.</b> If every vote is yes, the coordinator records the decision "commit" durably and tells every participant, which commit and release their locks. If any vote is no, or a participant does not answer in time, the decision is "abort" and everyone rolls back.',
+          'The result is real atomicity: no outcome exists in which one participant committed and another did not. The weakness is the gap between the phases. A participant that has voted yes and not yet heard the decision is <b>in doubt</b>. It cannot commit, because another participant may have voted no. It cannot abort, because the decision may have been commit. If the coordinator has crashed, it can only wait, <b>holding its locks</b>, until the coordinator comes back.',
+          'The costs follow. Every transaction takes two round trips and several forced writes to disk, and is as slow as its slowest participant. It succeeds only if every participant is up, so availability is the product of all of theirs. And every participant has to implement the protocol: relational databases and some message brokers do (the XA standard), while most HTTP APIs and many NoSQL stores do not.',
+          'Where it is used today is mostly <b>inside</b> one product rather than between products. Distributed SQL databases such as Spanner and CockroachDB run it between their own shards. Stream processors use it to tie a sink to their checkpoints: Flink writes to Kafka inside a Kafka transaction that it commits only when the checkpoint completes.',
+        ],
+        pros: ['True all-or-nothing across systems', 'Nobody sees a half-finished state', 'Application code stays simple: it looks like one transaction'],
+        cons: ['Locks are held across network round trips', 'A coordinator crash at the wrong moment blocks participants until it recovers', 'Slower, and less available than any single participant', 'Every participant must support it'],
+        sim: 'Not modelled directly. Its cost appears in the sharding model, where 5% of writes are assumed to touch two shards and cost more.',
+      },
+      {
+        id: 'nonblocking',
+        title: 'Three-phase commit and consensus',
+        one: 'Two attempts to stop a failed coordinator from blocking everyone. Only one of them is used in practice.',
+        what: [
+          '<b>Three-phase commit</b> inserts a "pre-commit" step between the vote and the commit, so that participants who have lost the coordinator can work out the decision among themselves. It relies on timeouts being trustworthy: on being able to tell a dead machine from a slow network. Real networks do not allow that, and when they split, two groups of participants can reach different decisions. It is taught far more often than it is run.',
+          'What real systems do instead is keep two-phase commit and remove its single point of failure. The coordinator\'s decision, and each participant\'s prepared state, are stored in a <b>consensus group</b> (Paxos or Raft) of several machines. If the coordinator dies, another replica already knows the decision and finishes the job. This is how Spanner and CockroachDB commit a transaction that spans shards.',
+          'It is not free: every step of the protocol is now a replicated write, which is one reason a cross-shard transaction in such a database costs noticeably more than a single-shard one.',
+        ],
+        pros: ['Consensus-backed commit survives the loss of any single machine', 'Keeps real transactions across shards'],
+        cons: ['Each step waits for a majority of replicas', 'Only available inside databases built this way, not between arbitrary systems'],
+        sim: null,
+      },
+      {
+        id: 'saga',
+        title: 'Sagas',
+        one: 'Give up all-or-nothing. Run a chain of ordinary local transactions, and undo the earlier ones if a later one fails.',
+        what: [
+          'A saga splits the action into steps, each a normal transaction in one service: reserve the stock, charge the card, book the courier. Every step has a <b>compensating action</b> that reverses its effect: release the stock, refund the card. If step three fails, the saga runs the compensations for steps two and one.',
+          'There are two ways to drive it. In <b>orchestration</b>, one service holds the state of the saga and tells each participant what to do next; the flow is in one place and easy to follow, and that service becomes a dependency of everything. In <b>choreography</b>, each service reacts to the previous one\'s event and emits its own; nothing central exists, and the flow is spread over every service that takes part.',
+          'What is lost is <b>isolation</b>. Between the first step and the last, the world is in a half-finished state that other requests can see: stock is reserved for an order that may yet be cancelled. Designs cope by making the intermediate state explicit, for example an order with status "pending" that other code knows to treat with care.',
+          'Compensation is not rollback. A refund is a second, visible transaction, and some things cannot be undone at all: an email that has been sent, a parcel that has left. So put steps that can fail early and steps that cannot be undone last, and make every step and every compensation <b>idempotent</b>, because the saga will retry them.',
+        ],
+        pros: ['No locks held across services', 'Each service stays available and independent', 'Works with any system, including third-party APIs'],
+        cons: ['Half-finished states are visible to others', 'A compensation must be written and tested for every step', 'Some actions cannot be undone', 'Harder to reason about than one transaction'],
+        sim: null,
+      },
+      {
+        id: 'outbox',
+        title: 'The transactional outbox',
+        one: 'Turn two writes into one. Save the event in the same database transaction as the data, and publish it afterwards.',
+        what: [
+          'This is the direct fix for "save to the database, then publish to a queue". The service writes its business row and a row in an <b>outbox</b> table in a single local transaction, so either both exist or neither does. A separate relay then reads the outbox and publishes each row to the broker, marking it sent.',
+          'The relay can poll the table, or it can use <b>change data capture</b>: read the database\'s own replication log and turn each committed outbox row into a message. The second way adds no load to the table and loses nothing, because it reads the same log the database uses to recover.',
+          'The relay may crash after publishing and before recording that it did, so a message can be published twice. Delivery is <b>at least once</b>, and consumers must be idempotent; a common way is an "inbox" table of message IDs already handled, written in the same transaction as the consumer\'s own change.',
+        ],
+        pros: ['Needs nothing but an ordinary database transaction', 'No event is lost, and none is published for a change that was rolled back', 'The broker can be down without failing requests'],
+        cons: ['Events arrive a moment later, not instantly', 'Duplicates are possible, so consumers must deduplicate', 'One more moving part to run and monitor'],
+        sim: null,
+      },
+      {
+        id: 'tcc',
+        title: 'Reserve, then confirm',
+        one: 'Hold the resource for a limited time first. Confirm when everything else has succeeded; otherwise let the hold lapse.',
+        what: [
+          'Also called <b>try-confirm/cancel</b>. Each service offers three operations. <b>Try</b> sets a resource aside without committing to anything: hold the seat, authorise the card without capturing the money. <b>Confirm</b> turns the hold into the real thing. <b>Cancel</b> releases it.',
+          'It has the shape of two-phase commit, moved into the application, with one important change: a hold <b>expires</b>. If the caller crashes between try and confirm, nobody is stuck waiting on it. The seat goes back on sale after ten minutes; the card authorisation drops off after a few days.',
+          'It suits anything that is naturally reservable, which is why ticketing, hotel booking and payments all work this way. The cost is that every participant has to model the held state, and confirm has to be safe to repeat.',
+        ],
+        pros: ['Nothing is permanently blocked by a crash: holds time out', 'Users see an honest "held for you" state', 'Maps directly onto how payment providers already work'],
+        cons: ['Every service needs try, confirm and cancel, all idempotent', 'Held resources are unavailable to others meanwhile', 'A confirm that arrives after the hold has expired must be handled'],
+        sim: null,
+      },
+      {
+        id: 'avoid',
+        title: 'Not needing one',
+        one: 'The cheapest distributed transaction is the one you design away.',
+        what: [
+          '<b>Keep what must change together in one place.</b> If two tables are always updated together, put them in the same database and use an ordinary transaction. When sharding, choose a shard key that keeps related rows on one shard, so the common transactions never cross shards.',
+          '<b>Make one system the source of truth and derive the rest.</b> Write only to the database, and let the search index, the cache and the analytics store be fed from its change log. They lag by a moment and can always be rebuilt, and there is no second write to get out of step.',
+          '<b>Accept a short disagreement and repair it.</b> Where a brief mismatch is tolerable, let it happen and run a <b>reconciliation</b> job that compares the two systems and fixes differences. Payment systems do this every day against their bank\'s records, whatever else they use.',
+        ],
+        pros: ['Nothing new to build, run or get wrong', 'Local transactions are fast and well understood'],
+        cons: ['Limits how freely data can be split between services', 'Derived systems are slightly behind', 'Reconciliation finds problems after the fact, not before'],
+        sim: null,
+      },
+      {
+        id: 'choosing',
+        title: 'Choosing between them',
+        one: 'Start from what a half-finished state would cost, and whether every participant is yours.',
+        what: [
+          '<b>Can it live in one database?</b> Then use a local transaction and stop here.',
+          '<b>A database and a message broker?</b> The transactional outbox, with idempotent consumers.',
+          '<b>Shards or tables inside one distributed database?</b> Use its transactions. It runs two-phase commit for you, with the coordinator made fault-tolerant.',
+          '<b>Several services you own, in a long-running business process?</b> A saga. Use orchestration once there are more than a few steps.',
+          '<b>A scarce resource to be held while something else completes, such as a seat while the customer pays?</b> Reserve, then confirm, with an expiry.',
+          '<b>A third party you cannot change, such as a payment provider?</b> You cannot make it join a transaction. Use its idempotency keys, treat it as a saga step, and reconcile.',
+          '<b>Two-phase commit between separate systems</b> is the last resort: only when every participant supports it, a half-finished state is truly unacceptable, and you can live with the latency and with being as available as the least available participant.',
+        ],
+        pros: ['Most designs need only a local transaction, an outbox and idempotent consumers'],
+        cons: ['Every option except two-phase commit exposes some intermediate state: name it in the design'],
+        sim: null,
       },
     ],
   },

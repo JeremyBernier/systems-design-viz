@@ -13,6 +13,7 @@ export const FLOW = {
   query: 0xd55181,
   response: 0xb7d3f6,
   error: 0xe66767,
+  asset: 0x9bc53d, // static assets and media
 };
 export const STATUS = { good: 0x0ca30c, warning: 0xfab219, serious: 0xec835a, critical: 0xd03b3b, down: 0x55554f };
 
@@ -25,6 +26,8 @@ export function loadLevel(util, down) {
 }
 
 const HEIGHT = { client: 2.2, lb: 1.2, web: 2.3, cache: 1.2, db: 2.1, kafka: 1.5, consumer: 1.6, queue: 1.1, worker: 1.4, lake: 1.6, clickhouse: 2.1, trino: 1.9, bi: 2.0 };
+HEIGHT.cdn = 1.3;
+HEIGHT.blob = 1.4;
 const OVERVIEW = { pos: new THREE.Vector3(6.5, 36, 27), target: new THREE.Vector3(6.5, 0, 4) };
 const SIDE_PANELS = 620; // px of the window covered by the two side panels
 
@@ -130,6 +133,8 @@ export class Scene {
       trino: [22, 9.5],
       clickhouse: [10, 16.5],
       bi: [16, 16.5],
+      cdn: [-10, -7.5],
+      blob: [-5.5, -13.5],
     };
     for (const id in this.sim.nodes) {
       const type = this.sim.nodes[id].type;
@@ -202,6 +207,19 @@ export class Scene {
         add(new THREE.BoxGeometry(0.12, 0.6, 0.12), shell(), 0, 0.42, 0);
         add(new THREE.BoxGeometry(1.9, 1.15, 0.08), shell(), 0, 1.25, 0);
         [0.35, 0.6, 0.45, 0.8].forEach((h, i) => add(new THREE.BoxGeometry(0.25, h, 0.03), glow(), (i - 1.5) * 0.38, 0.8 + h / 2, 0.06));
+      } else if (type === 'cdn') {
+        // a hub ringed by edge locations
+        add(new THREE.CylinderGeometry(0.55, 0.55, 0.9, 24), shell(), 0, 0.55, 0);
+        add(new THREE.CylinderGeometry(0.57, 0.57, 0.05, 24), glow(), 0, 1.02, 0);
+        for (let i = 0; i < 5; i++) {
+          const a = (i / 5) * Math.PI * 2 - Math.PI / 2; // none in front, where the logo lies
+          add(new THREE.BoxGeometry(0.4, 0.5, 0.4), shell(), Math.cos(a) * 1.15, 0.35, Math.sin(a) * 1.15);
+          add(new THREE.BoxGeometry(0.3, 0.05, 0.3), glow(), Math.cos(a) * 1.15, 0.62, Math.sin(a) * 1.15);
+        }
+      } else if (type === 'blob') {
+        // a six-sided bucket of objects (the data lake's bucket is round)
+        add(new THREE.CylinderGeometry(1.1, 0.8, 1.0, 6), shell(), 0, 0.6, 0);
+        add(new THREE.CylinderGeometry(0.95, 0.95, 0.05, 6), glow(), 0, 1.12, 0);
       } else if (type === 'kafka') {
         // three partition logs; the bright bar is unread backlog (lag)
         v.bars = [];
@@ -324,6 +342,7 @@ export class Scene {
       add(w, 'db', FLOW.write);
       add(w, 'queue', FLOW.job);
       add(w, 'kafka', FLOW.event);
+      add(w, 'blob', FLOW.asset);
     }
     add('cache', 'db', FLOW.read);
     add('queue', 'worker', FLOW.job);
@@ -333,6 +352,8 @@ export class Scene {
     add('bi', 'clickhouse', FLOW.query);
     add('bi', 'trino', FLOW.query);
     add('trino', 'lake', FLOW.query);
+    add('client', 'cdn', FLOW.asset);
+    add('cdn', 'blob', FLOW.asset);
   }
 
   // ------------------------------------------------------------ particles
@@ -637,6 +658,7 @@ export class Scene {
       v.ringMat.color.copy(v.color);
       const focused = this.focusId === id;
       v.fade += ((focused ? 0.07 : disabled ? 0.3 : 1) - v.fade) * (1 - Math.exp(-dt * 7));
+      if (n.launching > 0) v.fade = Math.min(v.fade, 0.35); // a launching server is a ghost until it is in service
       const pulse = level === 'critical' ? 1.2 + 0.8 * Math.sin(sim.time * 12) : 1.3;
       for (const m of v.mats) {
         m.opacity = v.fade;
@@ -842,13 +864,17 @@ export class Scene {
       let stat;
       if (n.down) stat = sim.params.autoRestart ? `DOWN · restart in ${Math.max(0, Math.ceil(n.restartSecs - n.downFor))}s` : 'DOWN';
       else if (n.type === 'cache' && !n.active) stat = 'disabled';
+      else if (n.type === 'db' && n.failover > 0) stat = `FAILOVER · new primary in ${Math.ceil(n.failover)}s`;
+      else if (n.launching > 0) stat = `Launching… ${Math.ceil(n.launching)}s`; // autoscaled server still booting
       else if (n.type === 'kafka') stat = `${fmtRate(n.inRate)} msg/s · lag ${fmtRate(Math.max(n.lag, n.lagCH))}`;
       else if (n.type === 'lake') stat = `${fmtGB(n.storedGB)} · ${n.files.toLocaleString()} files`;
+      else if (n.type === 'cdn') stat = `${fmtRate(n.inRate)} obj/s · ${Math.round(n.hit * 100)}% edge hits`;
+      else if (n.type === 'blob') stat = `${fmtGB(n.storedGB)} · ${fmtRate(n.outRate)} GET/s`;
       else if (n.type === 'clickhouse') stat = `OLAP · ${fmtRate(n.insertRate)} rows/s · ${fmtRate(n.outRate)} q/s`;
       else if (n.type === 'trino' || n.type === 'bi') stat = `${n.outRate.toFixed(1)} queries/s`;
       else if (n.type === 'queue') stat = `${Math.round(n.queue).toLocaleString()} jobs waiting`;
-      else if (n.type === 'cache') stat = `${rawMetric(n, 'mem', sim.params)} · ${Math.round(n.hitRatio * n.warm * 100)}% hits`;
-      else if (n.type === 'db') stat = `OLTP · ${fmtRate(n.outRate)} qps`;
+      else if (n.type === 'cache') stat = `${rawMetric(n, 'mem', sim.params)} · ${Math.round(n.hitRatio * n.warm * 100)}% hits${n.nodes > 1 ? ` · ${n.lostNodes ? n.nodesUp + '/' : ''}${n.nodes} nodes` : ''}`;
+      else if (n.type === 'db') stat = `OLTP · ${fmtRate(n.outRate)} qps${n.shards > 1 ? ` · ${n.shards} shards` : ''}${n.replicas ? ` · ${n.replicasUp < n.replicas ? n.replicasUp + '/' : ''}${n.replicas} repl` : ''}`;
       else if (n.type === 'worker') stat = `${fmtRate(n.outRate)} jobs/s`;
       else if (n.type === 'consumer') stat = `${fmtRate(n.outRate)} msg/s`;
       else stat = `${fmtRate(n.type === 'client' ? n.outRate : n.inRate)} req/s`;

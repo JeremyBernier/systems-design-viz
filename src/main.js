@@ -2,6 +2,9 @@ import { Sim, NODE_INFO } from './sim.js';
 import { PRESETS } from './presets.js';
 import { Scene } from './scene.js';
 import { UI } from './ui.js';
+import { serialise, load as loadState } from './share.js';
+import { AUTO_PARAMS, autoQuery } from './autoscale.js';
+import { DEFAULTS as REL_DEFAULTS } from './latency.js';
 
 const sim = new Sim();
 let paused = false;
@@ -51,6 +54,7 @@ const ui = new UI(sim, {
   },
   onReset: () => {
     Object.assign(sim.params, { autoRestart: true, compaction: true });
+    Object.assign(sim.params, AUTO_PARAMS, REL_DEFAULTS); // steady traffic, autoscaling off, no retries, stock SLO
     applyPreset(PRESETS.reference);
   },
 });
@@ -82,26 +86,46 @@ function frame(now) {
     uiAcc = 0;
     scene.updateLabels();
     ui.update();
+    syncLink();
   }
   ui.drawCharts();
   requestAnimationFrame(frame);
 }
 // Deep links: ?preset=uber&traffic=4000&web=4&db=dynamodb&focus=db&t=20
 const q = new URLSearchParams(location.search);
-if (PRESETS[q.get('preset')]) {
-  applyPreset(PRESETS[q.get('preset')]);
-  ui.setPreset(q.get('preset'));
-}
-if (q.has('traffic')) sim.params.traffic = Math.min(20000, Math.max(20, +q.get('traffic') || 600));
-if (q.has('queries')) sim.params.queryRate = Math.min(200, Math.max(0, +q.get('queries') || 0));
-if (q.has('compaction')) sim.params.compaction = q.get('compaction') !== '0';
-// ?db=dynamodb&web=lambda… picks a technology per component type (olap = the OLAP database)
-for (const [k, v] of q) if (k !== 'web' || isNaN(+v)) sim.setTech(k === 'olap' ? 'clickhouse' : k, v, true);
-for (let n = Math.min(6, +q.get('web') || 0); sim.webCount < n; ) sim.addWeb();
-for (let i = 0, n = Math.min(120, +q.get('t') || 0) * 30; i < n; i++) sim.step(STEP); // ?t=20 skips ahead 20s
+// The rest of the state (every param, components, connections) rides along too: see share.js.
+const link = loadState(sim, q, applyPreset);
+autoQuery(sim.params, q); // readable aliases: ?pattern=daily&autoscale=1&asmin=2&asmax=6&astarget=60&wauto=1
+if (link.preset) ui.setPreset(link.preset);
+for (let i = 0, n = link.t * 30; i < n; i++) sim.step(STEP); // ?t=20 skips ahead 20s
 booted = true;
 ui.syncControls();
-if (sim.nodes[q.get('focus')]) select(q.get('focus'));
+if (sim.nodes[link.focus] && sim.nodes[link.focus].active) select(link.focus);
+
+// Save and share: keep the address bar holding a link that rebuilds this exact system.
+// Polled from the UI tick rather than hooked into each control, so nothing can be missed.
+const linkQuery = () => serialise(sim, { preset: document.getElementById('preset').value, focus: ui.selected, t: q.get('t') });
+const linkURL = (s) => location.pathname + (s ? '?' + s : '') + location.hash;
+let linkShown = linkQuery();
+let linkTimer = 0;
+function syncLink() {
+  const s = linkQuery();
+  if (s === linkShown) return;
+  linkShown = s;
+  clearTimeout(linkTimer);
+  linkTimer = setTimeout(() => history.replaceState(null, '', linkURL(s)), 400);
+}
+document.getElementById('copy-link').addEventListener('click', async () => {
+  const s = (linkShown = linkQuery());
+  clearTimeout(linkTimer);
+  history.replaceState(null, '', linkURL(s));
+  try {
+    await navigator.clipboard.writeText(location.origin + linkURL(s));
+    ui.toast('Link copied. Opening it rebuilds this exact system.');
+  } catch {
+    ui.toast('Could not reach the clipboard. Copy the address bar instead — it always holds the current link.', 'bad');
+  }
+});
 
 scene.updateLabels();
 ui.update();

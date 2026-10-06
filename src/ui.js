@@ -3,6 +3,11 @@ import { TECH, logoSVG } from './tech.js';
 import { PRESETS } from './presets.js';
 import { costs, nodeCost, fmtUSD } from './cost.js';
 import { loadLevel } from './scene.js';
+import { initModelUI, pricingHTML, syncPricing } from './modelui.js';
+import { DATA_STEP, MAX_REPLICAS, SHARD_STEPS, MAX_CACHE_NODES, CACHE_NODE_CAP } from './datatier.js';
+import { fmtTTL } from './cdn.js';
+import { RETRY_POLICIES, SLO_TARGETS } from './latency.js';
+import { PATTERNS, DAY, trafficInfo, autoInfo, costAverage } from './autoscale.js';
 
 const $ = (id) => document.getElementById(id);
 const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -33,6 +38,11 @@ const NOTES = {
   'clickhouse.disk': 'Columnar, ~8× compressed',
   'trino.net': 'Parquet data pulled from S3 for each query',
   'trino.cpu': 'Decoding Parquet and running joins / aggregations',
+  'web.net': 'API responses, plus every image and video when there is no CDN',
+  'cdn.disk': 'Objects cached at the edge right now',
+  'cdn.net': 'Delivered to users from the edge + cache misses pulled from the origin',
+  'blob.disk': 'Grows with every upload; you pay per GB-month',
+  'blob.net': 'CDN cache misses and uploads (or every asset read when there is no CDN)',
 };
 
 const TIPS = [
@@ -40,12 +50,21 @@ const TIPS = [
   ['Scale out', 'Add web servers. The bottleneck moves — now the database is the limit.'],
   ['Cascade failure', 'Run near capacity, then click a web server and kill it. The survivors inherit its load and fall like dominoes.'],
   ['Cache stampede', 'At ~4,000 req/s with 4+ servers, kill the cache. All reads hit the database at once.'],
+  ['Flash crowd vs. boot time', 'At ~1,000 req/s, turn on web autoscaling and pick the flash crowd pattern. On EC2 the autoscaler reacts within seconds, but the new servers are still launching while the old ones drown and crash. Switch the web tier to Lambda and the same crowd is absorbed, at the price of cold starts.'],
+  ['Pay for the peak, or follow it', 'Set ~4,000 req/s with the daily cycle and 6 web servers, and note the average cost in the breakdown. Then turn on autoscaling (min 2, max 6) and watch a day go by: the fleet follows the curve, a step behind, and the average drops.'],
   ['Hidden backlog', 'The job queue and Kafka absorb overload silently. Watch queue depth and consumer lag grow while requests still succeed.'],
   ['Fill the disk', 'Raise the write percentage and watch database storage climb until writes are refused.'],
   ['Build it yourself', 'Remove the cache, place it again from Build, then use Connect to wire web servers to it. An unwired component does nothing.'],
   ['Swap the technology', 'Click any component and change its technology. DynamoDB throttles instead of crashing; Lambda cannot be knocked over but costs more at high traffic; Firehose ends the small-files problem. Watch latency, freshness and cost.'],
   ['Small files problem', 'Turn off Iceberg compaction and watch the lake file count climb. A few minutes later Trino queries crawl.'],
   ['Starve ingestion', 'Push dashboard queries past ~100/s. ClickHouse spends its CPU on queries, inserts fall behind and dashboards go stale.'],
+  ['Replicas are for reads', 'Remove the cache, set writes to 2% and run 6 web servers at 6,000 req/s: the database drowns in reads. Add 2 read replicas and it recovers. Now raise writes to 40%: every write still goes through the one primary, replicas stop helping and fall behind. Only shards raise the write ceiling — and 4 shards give about 3×, not 4×.'],
+  ['Failover, and losing one node of many', 'Give the database a read replica and kill it: writes fail for about 30 s while the replica is promoted, but reads keep flowing. Compare with no replica. Then give the cache 3 nodes and kill it: one node dies and only a third of the keys go cold.'],
+  ['Remove the CDN', 'Pick the Instagram or YouTube system, click the CDN and remove it. Every photo and video now squeezes through the web servers: their network cards saturate at 1 Gbps while the CPU sits idle, most asset requests fail, and "Data transfer out" takes the CDN\'s place on the bill.'],
+  ['Cold edge', 'Kill the CDN and let it restart, or drag the CDN cache TTL down to a few seconds. Misses pour into object storage until the edge is warm again; switch the CDN to Cloudflare or Fastly and each of those bytes is also billed as origin egress.'],
+  ['Retry storm', 'At ~800 req/s set client retries to Naive and hit Traffic spike. Offered load jumps to 4× the real traffic and stays there after the spike has passed, until the servers run out of memory. Repeat with Backoff + budget: the same spike is over in seconds.'],
+  ['A failure that never heals', 'Switch the web servers to AWS Lambda (it sheds load instead of crashing), set ~2,500 req/s, a 0.5 s client timeout and Naive retries, then spike. Nothing is broken and the spike is long gone, yet every request fails — until you change the retry policy or cut traffic.'],
+  ['Chase the tail', 'Raise traffic toward the web tier’s limit and watch p99 pull away from p50 before any request fails. Then tighten the p99 target and see the latency SLO break while the average still looks fine.'],
 ];
 
 // ---------------------------------------------------------------- charts
@@ -152,11 +171,13 @@ export class UI {
       { key: 'in', label: 'Incoming', color: '#3987e5', dash: [4, 3] },
       { key: 'ok', label: 'Served', color: '#199e70' },
       { key: 'err', label: 'Errors', color: '#e66767' },
+      { key: 'orig', label: 'Without retries', color: '#9085e9', dash: [2, 3] },
     ];
     this.mainChart = new Chart($('main-chart'), { series, fmt: (v) => fmtRate(v) + ' req/s' });
     $('main-legend').innerHTML =
       '<span>Last 60 s · req/s</span>' + series.map((s) => `<span><i style="background:${s.color}"></i>${s.label}<b data-k="${s.key}"></b></span>`).join('');
     this.legendVals = [...$('main-legend').querySelectorAll('b')];
+    this._bindDelivery();
 
     // --- controls. Traffic slider is logarithmic: 20 → 20,000 req/s
     const p = sim.params;
@@ -175,6 +196,7 @@ export class UI {
       b.addEventListener('click', () => {
         const k = b.dataset.step;
         if (k === 'web') +b.dataset.d > 0 ? sim.addWeb() : sim.removeWeb();
+        else if (DATA_STEP[k]) p[k] = DATA_STEP[k](p[k], +b.dataset.d); // replicas, shards, cache nodes
         else p[k] = Math.min(6, Math.max(1, p[k] + +b.dataset.d));
         if (this.selected && !sim.nodes[this.selected].active) this.onSelect(null);
         this.syncControls();
@@ -199,6 +221,30 @@ export class UI {
     });
     this.setPreset('reference');
     $('spike').addEventListener('click', () => sim.triggerSpike());
+    // --- traffic pattern + autoscaling (autoscale.js)
+    $('pattern').innerHTML = Object.entries(PATTERNS).map(([k, v]) => `<option value="${k}">${v.name}</option>`).join('');
+    $('pattern').addEventListener('change', (e) => {
+      p.pattern = e.target.value;
+      this.syncControls();
+    });
+    for (const k of ['autoscale', 'workerAuto'])
+      $(k).addEventListener('change', (e) => {
+        p[k] = e.target.checked;
+        this.syncControls();
+      });
+    for (const b of document.querySelectorAll('[data-as]'))
+      b.addEventListener('click', () => {
+        const d = +b.dataset.d;
+        // min ≤ max ≤ the number of servers the diagram has room for
+        if (b.dataset.as === 'asMin') p.asMin = Math.min(p.asMax, Math.max(1, p.asMin + d));
+        else p.asMax = Math.min(sim.webs.length, Math.max(p.asMin, p.asMax + d));
+        this.syncControls();
+      });
+    $('asTarget').addEventListener('input', (e) => {
+      p.asTarget = +e.target.value;
+      this.syncControls();
+    });
+    // --- end traffic pattern + autoscaling
     $('pause').addEventListener('click', () => ($('pause').textContent = onPause() ? 'Resume' : 'Pause'));
     $('reset').addEventListener('click', () => {
       onReset();
@@ -209,6 +255,7 @@ export class UI {
     this.syncControls = () => {
       traffic.value = fromTraffic(p.traffic);
       $('v-traffic').textContent = p.traffic.toLocaleString();
+      this._syncAuto(); // traffic pattern + autoscaling controls
       $('write').value = p.writePct;
       $('v-write').textContent = p.writePct + '%';
       $('v-webCount').textContent = sim.webCount;
@@ -217,8 +264,11 @@ export class UI {
       $('compaction').checked = p.compaction;
       $('queries').value = p.queryRate;
       $('v-queries').textContent = p.queryRate;
+      this._syncDataTier();
     };
     this.syncControls();
+    // --- model your own system: workload assumptions, pricing model, capacity planner (modelui.js)
+    initModelUI(this, sim);
 
     $('detail').addEventListener('click', (e) => {
       const row = e.target.closest('.cost-row[data-id]');
@@ -232,6 +282,7 @@ export class UI {
     });
     $('connect').addEventListener('click', () => this.setMode(this.mode === 'connect' ? null : 'connect'));
     this.setMode(null);
+    this._initReliability();
 
     sim.on('log', (kind, msg) => {
       const li = document.createElement('li');
@@ -245,6 +296,138 @@ export class UI {
     });
 
     this.select(null);
+  }
+
+  // ---- data tier (datatier.js): replica / shard / cache-node steppers
+  // Engines that partition and replicate on their own get the steppers greyed out, with a line saying why.
+  _syncDataTier() {
+    const p = this.sim.params;
+    const eng = this.sim.techOf('db');
+    const sig = [eng.name, p.dbReplicas, p.dbShards, p.cacheNodes].join();
+    if (sig === this._dataSig) return;
+    this._dataSig = sig;
+    $('v-dbReplicas').textContent = eng.repl ? p.dbReplicas : '—';
+    $('v-dbShards').textContent = eng.shard ? p.dbShards : '—';
+    $('v-cacheNodes').textContent = p.cacheNodes;
+    const limits = { dbReplicas: [eng.repl ? 0 : Infinity, MAX_REPLICAS], dbShards: [eng.shard ? SHARD_STEPS[0] : Infinity, SHARD_STEPS[SHARD_STEPS.length - 1]], cacheNodes: [1, MAX_CACHE_NODES] };
+    for (const b of document.querySelectorAll('[data-step]')) {
+      const lim = limits[b.dataset.step];
+      if (lim) b.disabled = lim[0] === Infinity || (+b.dataset.d < 0 ? p[b.dataset.step] <= lim[0] : p[b.dataset.step] >= lim[1]);
+    }
+    const hint = $('data-hint');
+    hint.hidden = !!eng.repl;
+    hint.textContent = `${eng.name} partitions and replicates data across its own nodes, so there are no replicas or shards for you to manage.`;
+  }
+
+  // Rows added to the live metrics of the database and the cache.
+  _tierStats(n) {
+    const sim = this.sim;
+    if (n.type === 'cache') {
+      const rows = [['Cache nodes', `${n.nodesUp} of ${n.nodes} up · ${fmtRate(CACHE_NODE_CAP)} ops/s and ${fmtGB((n.spec || { ramGB: 32 }).ramGB)} each`]];
+      if (n.nodes > 1) rows.push(['Keys that go cold if a node dies', pct(1 / n.nodesUp)]);
+      return rows;
+    }
+    const eng = n.tech;
+    if (!eng.repl) return [['Replicas and shards', `built in — ${eng.name} spreads data over its own nodes`]];
+    const S = n.shards;
+    const R = n.replicas;
+    const each = S > 1 ? ' per shard' : '';
+    const rows = [
+      ['Read replicas', R ? `${n.replicasUp} of ${R} up${each}` : 'none'],
+      ['Replication lag', R ? (n.failover > 0 ? 'paused during failover' : `${fmtDur(n.replLag)} behind the primary`) : '—'],
+      ['Shards', S > 1 ? `${S} · busiest takes ${pct(n.hotShare)} of the load` : '1 (not sharded)'],
+    ];
+    if (S > 1) rows.push(['Busiest shard load', `${fmtRate(Math.min(n.shardLoad, n.shardCap))} of ${fmtRate(n.shardCap)} units/s`]);
+    rows.push([
+      'Failover',
+      n.failover > 0
+        ? `promoting a replica · ${Math.ceil(n.failover)}s to go`
+        : n.lostNodes
+          ? 'done · old primary is being rebuilt as a replica'
+          : R
+            ? `ready · about ${eng.repl.failover}s to promote a replica`
+            : `no replica to promote · a crash means a ${n.restartSecs}s restart`,
+    ]);
+    return rows;
+  }
+
+  // Reliability section: client timeout, retry policy, SLO targets and the latency chart.
+  _initReliability() {
+    const p = this.sim.params;
+    const series = [
+      { key: 'p50', label: 'p50', color: '#3987e5' },
+      { key: 'p99', label: 'p99', color: '#c98500' },
+      { key: 'sloP99', label: 'target', color: '#e66767', dash: [4, 3] },
+    ];
+    this.relChart = new Chart($('rel-chart'), { series, fmt: (v) => fmtDur(v / 1000) });
+    $('rel-legend').innerHTML = '<span>Latency</span>' + series.map((s) => `<span><i style="background:${s.color}"></i>${s.label}</span>`).join('');
+    $('retryPolicy').innerHTML = Object.entries(RETRY_POLICIES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+    $('sloAvail').innerHTML = SLO_TARGETS.map((v) => `<option value="${v}">${v}%</option>`).join('');
+    for (const k of ['timeout', 'maxRetries', 'sloP99', 'sloAvail'])
+      $(k).addEventListener('input', (e) => {
+        p[k] = +e.target.value;
+        this.syncControls();
+      });
+    $('retryPolicy').addEventListener('change', (e) => {
+      p.retryPolicy = e.target.value;
+      this.syncControls();
+    });
+    // extend the shared sync rather than editing it
+    const sync = this.syncControls;
+    this.syncControls = () => {
+      sync();
+      for (const k of ['timeout', 'maxRetries', 'sloP99', 'sloAvail', 'retryPolicy']) $(k).value = p[k];
+      $('v-timeout').textContent = p.timeout + ' s';
+      $('v-maxRetries').textContent = p.retryPolicy === 'off' ? '—' : p.maxRetries;
+      $('maxRetries').disabled = p.retryPolicy === 'off';
+      $('v-sloP99').textContent = fmtDur(p.sloP99 / 1000);
+    };
+    this.syncControls();
+  }
+
+  // Header tiles and the Reliability summary. Called from update().
+  _updateReliability() {
+    const sim = this.sim;
+    const t = sim.totals;
+    const r = sim.rel;
+    const p = sim.params;
+    const live = t.ok + t.err >= 1 && t.p50 > 0;
+    // round down: 99.996% must not read as 100%
+    const pc = (v, d) => (v > 0.999999 ? '100' : (Math.floor(v * 10 ** (d + 2)) / 10 ** d).toFixed(d)) + '%';
+    const burn = (r.burn < 100 ? r.burn.toFixed(1) : Math.round(r.burn).toLocaleString()) + '×';
+    $('t-ins').textContent = r.amp > 1.02 ? `req/s · ${r.amp.toFixed(1)}× with retries` : 'req/s';
+    $('t-lat').textContent = live ? fmtDur(t.p50) : '—';
+    $('t-p99').textContent = live ? `p99 ${fmtDur(t.p99)} · avg ${fmtDur(t.latency)}` : 'p99 —';
+    $('tile-lat').classList.toggle('bad', !r.latOk);
+    $('t-slo-name').textContent = `SLO ${p.sloAvail}% · 60 s`;
+    $('t-slo').textContent = pc(r.avail, 2);
+    $('t-budget').textContent = (r.budgetLeft > 0 ? `budget ${Math.round(r.budgetLeft * 100)}% left` : 'error budget spent') + (r.burn >= 1 ? ` · burn ${burn}` : '');
+    $('tile-slo').classList.toggle('bad', !r.availOk);
+    $('rel-stats').innerHTML = [
+      ['Real traffic', `${fmtRate(t.orig)} req/s`],
+      ['Offered, with retries', `${fmtRate(t.in)} req/s (${r.amp.toFixed(2)}×)`],
+      ['Timed out (work wasted)', `${fmtRate(t.timeouts)} req/s`],
+      ['Succeeded, last 60 s', `${pc(r.avail, 2)} of ${p.sloAvail}%`],
+      ['Error budget', r.budgetLeft > 0 ? `${Math.round(r.budgetLeft * 100)}% left` : 'spent'],
+      ['Burn rate', `${burn} the sustainable pace`],
+      [`Faster than ${fmtDur(p.sloP99 / 1000)}, last 60 s`, `${pc(r.fast, 1)} of 99%`],
+    ]
+      .map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`)
+      .join('');
+    $('rel-status').textContent = !r.availOk
+      ? `${r.status} The availability SLO is broken: more than ${parseFloat((100 - p.sloAvail).toFixed(2))}% of the last minute’s requests failed.`
+      : !r.latOk
+        ? `${r.status} The latency SLO is broken: more than 1% of responses took longer than ${fmtDur(p.sloP99 / 1000)}, however good the average looks.`
+        : r.status;
+  }
+
+  // Extra rows for the detail panel's metrics list: percentiles wherever a latency exists.
+  _relStats(n) {
+    const t = this.sim.totals;
+    const rows = [];
+    if (n.pct && n.pct.p50 > 0) rows.push(['Latency p50 / p95 / p99', `${fmtDur(n.pct.p50)} / ${fmtDur(n.pct.p95)} / ${fmtDur(n.pct.p99)}`]);
+    if (n.type === 'client') rows.push(['Real traffic / offered with retries', `${fmtRate(t.orig)} / ${fmtRate(t.in)} req/s`], ['Timed out', `${fmtRate(t.timeouts)} req/s`]);
+    return rows;
   }
 
   // Build modes: placing a new component, or wiring two together.
@@ -271,6 +454,81 @@ export class UI {
     t.hidden = false;
     clearTimeout(this._toast);
     this._toast = setTimeout(() => (t.hidden = true), 4200);
+  }
+
+  // "Content delivery" controls. Both sliders are logarithmic; their positions are refreshed
+  // from the params on every update, so presets and resets need no extra wiring.
+  _bindDelivery() {
+    const p = this.sim.params;
+    const SIZE = [5, 5000]; // kB
+    const TTL = [1, 2592000]; // 1 s → 30 days
+    const to = ([lo, hi], x) => +(lo * Math.pow(hi / lo, x / 100)).toPrecision(3);
+    const from = ([lo, hi], v) => Math.round((Math.log(Math.max(v, lo) / lo) / Math.log(hi / lo)) * 100);
+    $('assetKB').addEventListener('input', (e) => (p.assetKB = to(SIZE, +e.target.value)));
+    $('cdnTTL').addEventListener('input', (e) => (p.cdnTTL = to(TTL, +e.target.value)));
+    this._syncDelivery = () => {
+      const { cdn, lb } = this.sim.nodes;
+      const A = this.sim.assets;
+      const set = (id, v) => +$(id).value !== v && ($(id).value = v);
+      set('assetKB', from(SIZE, p.assetKB));
+      set('cdnTTL', from(TTL, p.cdnTTL));
+      $('v-assetKB').textContent = p.assetKB >= 1000 ? parseFloat((p.assetKB / 1000).toFixed(2)) + ' MB' : p.assetKB + ' kB';
+      $('v-cdnTTL').textContent = fmtTTL(p.cdnTTL);
+      const all = A.edgeBytes + A.originBytes + (lb._apiBps || 0) / 8; // every byte reaching users
+      const failing = A.want > 0 ? A.err / A.want : 0;
+      $('delivery-hint').textContent =
+        `${fmtRate(A.want)} assets/s, ${p.assetsPerReq} per API request. ` +
+        (cdn.active && !cdn.down
+          ? `The CDN carries ${pct(all > 0 ? A.edgeBytes / all : 0)} of all bytes; ${pct(cdn.hit)} of asset requests are edge hits.`
+          : 'No CDN: every asset goes through the load balancer and web servers.') +
+        (failing > 0.005 ? ` ${pct(failing)} of asset requests are failing.` : '');
+    };
+  }
+
+  // Traffic pattern and autoscaling controls: settings on change…
+  _syncAuto() {
+    const p = this.sim.params;
+    $('pattern').value = p.pattern;
+    $('autoscale').checked = p.autoscale;
+    $('workerAuto').checked = p.workerAuto;
+    $('as-opts').hidden = !p.autoscale;
+    $('v-asMin').textContent = p.asMin;
+    $('v-asMax').textContent = p.asMax;
+    $('asTarget').value = p.asTarget;
+    $('v-asTarget').textContent = p.asTarget + '%';
+    this._renderAuto();
+  }
+
+  // …and what they are doing right now, ~5×/s.
+  _renderAuto() {
+    const sim = this.sim;
+    const p = sim.params;
+    const tr = trafficInfo(sim);
+    $('v-pattern').textContent = p.pattern === 'steady' ? tr.text : `${tr.text} Now ≈ ${fmtRate(p.traffic * tr.mul)} req/s.`;
+    const a = autoInfo(sim);
+    $('as-status').textContent = a.web;
+    $('wa-status').textContent = a.worker;
+    // the autoscaler owns the count while it is on: the steppers just display it
+    for (const b of document.querySelectorAll('[data-step="web"]')) b.disabled = a.locked;
+    for (const b of document.querySelectorAll('[data-step="workerCount"]')) b.disabled = p.workerAuto;
+    $('v-workerCount').textContent = p.workerCount;
+  }
+
+  // Cost averaged over the last traffic cycle, shown under the total when traffic or capacity moves.
+  _avgCost() {
+    const sim = this.sim;
+    const p = sim.params;
+    const a = (p.pattern !== 'steady' || p.autoscale || p.workerAuto) && costAverage(sim);
+    if (!a) return '';
+    const span = p.pattern === 'daily' && a.secs >= DAY ? 'the last day' : `the last ${a.secs}s`;
+    const fleet = `${a.webAvg.toFixed(1)} web servers (peak ${a.webPeak})` + (a.workerPeak > a.workerAvg ? ` and ${a.workerAvg.toFixed(1)} workers (peak ${a.workerPeak})` : '');
+    const note =
+      a.saved >= 1
+        ? `The fleet averaged ${fleet}. A fixed fleet sized for that peak would cost ${fmtUSD(a.saved)} / month more.`
+        : sim.techOf('web').serverless
+          ? 'The web tier is billed per request, so its cost follows the traffic curve by itself.'
+          : `The fleet stayed at ${fleet}: you pay for the peak around the clock.`;
+    return `<div class="cost-row cost-avg" title="Mean of the monthly rate, sampled once a second"><span>Average over ${span}</span><b>${fmtUSD(a.avg)} / month</b></div><p class="hint cost-avg">${note}</p>`;
   }
 
   _renderPalette() {
@@ -319,7 +577,7 @@ export class UI {
       this._costSig = null;
       el.innerHTML =
         `<h2>How to use</h2><p class="d-about">Each dot is a slice of live traffic. <b>Click any component</b> to zoom inside and see its CPU, memory, storage and network. Drag the floor to orbit, scroll to zoom. Use <b>Build</b> on the left to add components and wire them together.</p>` +
-        `<h2>Estimated cost</h2><div id="costs"></div><p class="hint">Ballpark from public on-demand list prices (AWS / Google Cloud). No discounts or reserved pricing.</p>` +
+        `<h2>Estimated cost</h2><div id="costs"></div>${pricingHTML()}` +
         `<h2>Experiments to try</h2><ol class="tips">${TIPS.map(([t, d]) => `<li><b>${t}.</b> ${d}</li>`).join('')}</ol>`;
       return;
     }
@@ -402,6 +660,14 @@ export class UI {
         add.addEventListener('click', () => this.sim.freeDisk());
         act.append(add);
       }
+      // data tier: with auto-restart off, a lost cache node or the old primary needs bringing back by hand
+      if (node.type === 'db' || node.type === 'cache') {
+        const heal = document.createElement('button');
+        heal.id = 'd-heal';
+        heal.textContent = node.type === 'db' ? 'Rebuild lost replica' : 'Replace lost node';
+        heal.addEventListener('click', () => this.sim.heal(id));
+        act.append(heal);
+      }
     }
     this.update();
   }
@@ -417,13 +683,13 @@ export class UI {
       case 'web':
         return [['Arriving', r(n.inRate)], ['Served', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} req/s max`], ['Threads busy', `${Math.round(n.threads * 256)} of 256`], ['Waiting in memory', `${fmtRate(n.queue)} requests`], ['Response time', fmtDur(n.latency)], ['Rejected (503)', r(n.dropRate)], ['Crash risk', pct(n.stress)], ['Crashes so far', n.crashes]];
       case 'cache':
-        return [['Lookups', `${fmtRate(n.inRate)} of 30.0k ops/s`], ['Hit ratio', pct(n.hitRatio * n.warm)], ['Hits (served from RAM)', r(n.outRate, 'ops/s')], ['Misses → database', r(n.missRate, 'ops/s')], ['Warmth', pct(n.warm)]];
+        return [['Lookups', `${fmtRate(n.inRate)} of ${fmtRate(n.cap || CACHE_NODE_CAP)} ops/s`], ['Hit ratio', pct(n.hitRatio * n.warm)], ['Hits (served from RAM)', r(n.outRate, 'ops/s')], ['Misses → database', r(n.missRate, 'ops/s')], ['Warmth', pct(n.warm)]];
       case 'db':
         return [['Reads', r(n.readRate, 'qps')], [`Writes (${n.writeCost}× the cost of a read)`, r(n.writeRate, 'qps')], ['Query load', `${fmtRate(n.load || 0)} of ${fmtRate(n.capUnits || 0)} units/s`], ['Query latency', fmtDur(n.latency)], ['Connections open', n.maxConns ? `${Math.round(n.conns * n.maxConns)} of ${n.maxConns}` : 'none (stateless API)'], ['Data stored', fmtGB(n.storedGB || 0)], ['Failed queries', r(n.dropRate, 'qps')], ['Crash risk', pct(n.stress)]];
       case 'kafka':
         return [['Produced', `${fmtRate(n.inRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Consumed (2 groups)', r(n.outRate, 'msg/s')], ['Lag: lake writer', `${fmtRate(n.lag)} of ${fmtRate(n.retention || 0)} retained`], [`Lag: ${this.sim.nodes.clickhouse.label}`, `${fmtRate(n.lagCH)} of ${fmtRate(n.retention || 0)} retained`], ['Lag per partition', n.partitions.map((v) => fmtRate(v)).join(' · ')], ['Expired unread', r(n.expiredRate, 'msg/s')]];
       case 'consumer':
-        return [['Reading from Kafka', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Raw events in', fmtBytes(n.outRate * 2e3)], ['Behind by', `${fmtRate(this.sim.nodes.kafka.lag)} msgs`], ['Parquet out → data lake', fmtBytes(this.sim.nodes.lake.ingestBytes)], ['Small files written', `${this.sim.techOf('consumer').files} per second`]];
+        return [['Reading from Kafka', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Raw events in', fmtBytes(n.outRate * p.eventBytes)], ['Behind by', `${fmtRate(this.sim.nodes.kafka.lag)} msgs`], ['Parquet out → data lake', fmtBytes(this.sim.nodes.lake.ingestBytes)], ['Small files written', `${this.sim.techOf('consumer').files} per second`]];
       case 'queue':
         return [['Enqueued', r(n.inRate, 'jobs/s')], ['Dequeued', r(n.outRate, 'jobs/s')], ['Jobs in queue', `${Math.round(n.queue).toLocaleString()} of ${(n.qmax || 0).toLocaleString()}`], ['Wait for a new job', fmtDur(n.latency || 0)], ['Rejected', r(n.dropRate, 'jobs/s')]];
       case 'lake':
@@ -434,6 +700,16 @@ export class UI {
         return [['Queries', `${n.outRate.toFixed(1)} of ${(n.cap || 0).toFixed(1)} /s`], ['CPU per query', `${n.cost.toFixed(1)} core-seconds`], ['Query latency', n.latency ? fmtDur(n.latency) : '—'], ['Queries waiting', `${Math.round(n.queue)} of 40`], ['Files opened per query', Math.round(24 + this.sim.nodes.lake.smallFiles * 0.2)], ['Rejected queries', `${n.dropRate.toFixed(1)} /s`], ['Crash risk', pct(n.stress)]];
       case 'bi':
         return [['Queries sent', `${n.outRate.toFixed(1)} /s`], [`Real-time (${this.sim.nodes.clickhouse.label})`, fmtDur(n.chLatency)], ['Ad-hoc (Trino)', fmtDur(n.trLatency)], [`${this.sim.nodes.clickhouse.label} data is behind by`, fmtDur(n.freshCH)], ['Lake data is behind by', fmtDur(n.freshLake)], ['Failing queries', `${n.failRate.toFixed(1)} /s`]];
+      case 'cdn': {
+        const A = this.sim.assets;
+        const all = A.edgeBytes + A.originBytes + (this.sim.nodes.lb._apiBps || 0) / 8;
+        return [['Asset requests', r(n.inRate, 'obj/s')], ['Edge hit ratio', `${pct(n.hit)} now · ${pct(n.hitRatio)} when warm`], ['Cache TTL', fmtTTL(p.cdnTTL)], ['Warmth', pct(n.warm)], ['Delivered from the edge', fmtBits(n.edgeBytes * 8)], ['Share of all bytes to users', pct(all > 0 ? A.edgeBytes / all : 0)], ['Misses → object storage', r(n.missRate, 'obj/s')], ['Time to first byte', fmtDur(n.latency)], ['Failed (502)', r(n.dropRate, 'obj/s')]];
+      }
+      case 'blob': {
+        const A = this.sim.assets;
+        const count = n.objects >= 1e9 ? (n.objects / 1e9).toFixed(2) + ' billion' : n.objects >= 1e6 ? (n.objects / 1e6).toFixed(1) + ' million' : Math.round(n.objects).toLocaleString();
+        return [['Data stored', fmtGB(n.storedGB)], ['Objects', count], ['Average object', p.assetKB >= 1000 ? parseFloat((p.assetKB / 1000).toFixed(2)) + ' MB' : p.assetKB + ' kB'], ['GET requests', `${fmtRate(n.getRate)} /s`], ['PUT requests (uploads)', `${n.putRate.toFixed(1)} /s`], ['Read out', fmtBytes(n.getRate * p.assetKB * 1e3)], ['Uploaded', fmtBytes(A.upBytes)], ['Growth', `${fmtGB((A.upBytes * 86400) / 1e9)} per day`]];
+      }
       case 'worker':
         return [['Processing', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} jobs/s`], ['Workers', `${p.workerCount} × ${Math.round((n.cap || 0) / p.workerCount)} jobs/s`]];
     }
@@ -450,8 +726,8 @@ export class UI {
     $('t-errs').textContent = fmtRate(t.err) + ' req/s failing';
     $('tile-err').classList.toggle('bad', t.errPct > 0.01);
     $('t-bw').textContent = fmtBits(sim.nodes.lb.bps).replace(' ', '\u2009');
-    $('t-lat').textContent = t.ok + t.err < 1 ? '—' : fmtDur(t.latency);
-    const vals = { in: t.in, ok: t.ok, err: t.err };
+    this._updateReliability();
+    const vals = { in: t.in, ok: t.ok, err: t.err, orig: t.orig };
     this.legendVals.forEach((b) => (b.textContent = fmtRate(vals[b.dataset.k])));
 
     const bn = sim.bottleneck;
@@ -463,7 +739,10 @@ export class UI {
     $('t-cost').textContent = fmtUSD(cost.total);
     $('t-cpm').textContent = cost.perMillion ? `per month · ${fmtUSD(cost.perMillion)} per 1M requests` : 'per month';
     this._renderPalette();
+    this._syncDelivery();
+    this._renderAuto();
     $('v-webCount').textContent = sim.webCount;
+    this._syncDataTier(); // the database engine can change from the detail panel
 
     if (!this.selected) {
       // cost breakdown: sorted bars, one hue
@@ -475,6 +754,8 @@ export class UI {
           .filter((i) => i.monthly >= 0.5)
           .map((i) => `<div class="cost-row" ${i.id ? `data-id="${i.id}"` : ''} title="${i.basis}"><span>${i.label}</span><b>${fmtUSD(i.monthly)}</b><i style="width:${(i.monthly / max) * 100}%"></i></div>`)
           .join('');
+      syncPricing(sim);
+      box.firstChild.insertAdjacentHTML('afterend', this._avgCost()); // average over the traffic cycle (autoscale.js)
       return;
     }
     if (!sim.nodes[this.selected].active) return this.onSelect(null);
@@ -499,7 +780,11 @@ export class UI {
     const c = nodeCost(sim, n);
     $('d-cost').textContent = c.basis;
     const data = [['Estimated cost', `${fmtUSD(c.monthly)} / month`]];
+    data.unshift(...this._relStats(n));
     if (n.type === 'db' || n.type === 'kafka' || n.type === 'clickhouse') data.push(['Disk throughput', fmtBytes(n.diskIO)]);
+    if (n.type === 'db' || n.type === 'cache') data.unshift(...this._tierStats(n));
+    const heal = $('d-heal');
+    if (heal) heal.hidden = !n.lostNodes || n.down;
     $('d-stats').innerHTML = [...this._stats(n), ...data].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
     const kill = $('d-kill');
     if (kill) {
@@ -510,6 +795,7 @@ export class UI {
 
   drawCharts() {
     this.mainChart.draw(this.sim.history);
+    this.relChart.draw(this.sim.history);
     for (const c of this.charts) c.draw(this.sim.history);
   }
 }

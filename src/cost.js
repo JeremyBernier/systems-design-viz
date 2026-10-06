@@ -1,5 +1,6 @@
 // Ballpark monthly cost of the running system. Per-technology prices live in tech.js.
-import { SECONDS, GB } from './tech.js';
+import { SECONDS, GB, priced } from './tech.js';
+import { fleetBasis } from './datatier.js';
 
 const EGRESS_PER_GB = 0.09; // data transfer out to the internet
 const RESPONSE_BYTES = 15e3; // of the 20 kB per request, ~15 kB is the response leaving the cloud
@@ -7,7 +8,9 @@ const RESPONSE_BYTES = 15e3; // of the 20 kB per request, ~15 kB is the response
 // → { monthly, basis } for one node
 export function nodeCost(sim, node) {
   if (!node.tech) return { monthly: 0, basis: 'Not your infrastructure' };
-  return { monthly: node.tech.cost(node, sim.params), basis: node.tech.basis };
+  // the pricing model discounts instance-hours only; priced() says whether this node had any
+  const { monthly, model } = priced(node, sim.params);
+  return { monthly, basis: node.tech.basis + fleetBasis(node) + (model ? ` · ${model.name}: −${Math.round((1 - model.mul) * 100)}% on instance-hours` : '') };
 }
 
 // → { total, perMillion, items: [{ id, label, monthly, basis }] } sorted by cost
@@ -19,8 +22,15 @@ export function costs(sim) {
     items.push({ id, label: node.label, ...nodeCost(sim, node) });
   }
   // responses leaving the cloud are billed per GB — often the surprise on the invoice
-  const egressGB = ((sim.totals.ok * RESPONSE_BYTES) / GB) * SECONDS;
-  items.push({ id: null, label: 'Data transfer out', monthly: egressGB * EGRESS_PER_GB, basis: '$0.09 per GB sent to the internet (~15 kB per response)' });
+  // Only bytes your own machines send to users are billed here: API responses, plus static assets and media
+  // when there is no CDN in front. What the CDN delivers is on the CDN's own line, at its cheaper rate.
+  const A = sim.assets;
+  const egressGB = ((sim.totals.ok * RESPONSE_BYTES * (sim.params.reqBytes / 20e3) + A.originBytes) / GB) * SECONDS;
+  items.push({ id: null, label: 'Data transfer out', monthly: egressGB * EGRESS_PER_GB, basis: '$0.09 per GB sent to the internet from your servers (~15 kB per API response, plus any assets not served by the CDN)' });
+  // cache misses travel origin → CDN; what that costs depends on the pair (S3 → CloudFront is free, a third-party CDN pays full egress)
+  const fill = sim.nodes.blob.tech.egressFree ? 0 : sim.nodes.cdn.tech.fill;
+  const fillGB = (A.fillBytes / GB) * SECONDS;
+  if (fillGB * fill > 0) items.push({ id: null, label: 'Origin → CDN transfer', monthly: fillGB * fill, basis: `$${fill} per GB the CDN fetches from object storage on a cache miss` });
   items.sort((a, b) => b.monthly - a.monthly);
   const total = items.reduce((s, i) => s + i.monthly, 0);
   const served = sim.totals.ok * SECONDS;

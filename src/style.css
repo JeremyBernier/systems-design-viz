@@ -295,6 +295,26 @@ p {
   width: 20px;
   text-align: center;
 }
+/* autoscaling group + traffic pattern (autoscale.js) */
+.as-group {
+  margin: 6px 0;
+  padding: 2px 8px 6px;
+  border-left: 2px solid var(--axis);
+}
+.as-group .hint {
+  margin: 0 0 4px;
+}
+.row select {
+  width: auto;
+  max-width: 70%;
+}
+.stepper button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.cost-avg {
+  margin: 0 0 8px;
+}
 button {
   font: inherit;
   color: var(--text);
@@ -322,6 +342,10 @@ button.danger {
 .stepper button {
   width: 26px;
   padding: 2px 0;
+}
+.stepper button:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
 .btns {
   display: flex;
@@ -737,4 +761,184 @@ select {
 .legend {
   white-space: nowrap;
   overflow: hidden;
+}
+
+/* ---------- model your own system: workload fold, number rows, planner dialog ---------- */
+.fold {
+  margin-top: 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 6px;
+}
+.fold summary {
+  cursor: pointer;
+  color: var(--text-2);
+}
+.fold summary em {
+  font-style: normal;
+  color: var(--accent);
+}
+.row.num {
+  flex-wrap: nowrap;
+}
+.row.num > span:last-child {
+  flex: none;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.row.num input {
+  width: 76px;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--axis);
+  border-radius: 6px;
+  padding: 3px 6px;
+}
+#planner {
+  width: min(940px, calc(100vw - 32px));
+  max-height: min(820px, calc(100vh - 32px));
+  padding: 0;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--axis);
+  border-radius: 10px;
+  overflow: hidden;
+}
+#planner[open] {
+  display: flex;
+  flex-direction: column;
+}
+#planner::backdrop {
+  background: rgb(0 0 0 / 0.6);
+}
+#planner h3 {
+  margin: 0;
+  font-size: 15px;
+}
+#planner h2 {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 16px 0 6px;
+}
+#planner h2:first-child {
+  margin-top: 0;
+}
+.pl-head,
+.pl-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.pl-foot {
+  border-bottom: 0;
+  border-top: 1px solid var(--line);
+}
+.pl-foot button {
+  flex: none;
+  border-color: var(--accent);
+  background: rgb(57 135 229 / 0.2);
+}
+.pl-body {
+  display: grid;
+  grid-template-columns: 290px 1fr;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.pl-in,
+.pl-out {
+  padding: 14px 16px;
+}
+.pl-in {
+  border-right: 1px solid var(--line);
+}
+.pl-line {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0 12px;
+  margin: 6px 0;
+  color: var(--text-2);
+}
+.pl-line b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.pl-line small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+}
+.pl-size {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--good);
+  border-radius: 6px;
+}
+.pl-size .pl-line {
+  margin: 0;
+}
+.pl-size em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--good);
+}
+.pl-size[data-level='warn'] {
+  border-left-color: var(--warning);
+}
+.pl-size[data-level='warn'] em {
+  color: var(--warning);
+}
+.pl-size[data-level='bad'] {
+  border-left-color: var(--critical);
+}
+.pl-size[data-level='bad'] em {
+  color: var(--serious);
+}
+.pl-size ul,
+.pl-flags {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.pl-flags li {
+  margin: 4px 0;
+}
+.pl-flags li::marker {
+  color: var(--serious);
+}
+@media (max-width: 900px) {
+  .pl-body {
+    grid-template-columns: 1fr;
+  }
+  .pl-in {
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+}
+/* ---------- reliability ---------- */
+#tile-slo.bad b,
+#tile-lat.bad small {
+  color: var(--critical);
+}
+#rel-legend {
+  margin-top: 8px;
+}
+#rel-chart {
+  display: block;
+  width: 100%;
+  height: 44px;
+  margin: 4px 0 8px;
+}
+#rel-stats {
+  font-size: 12px;
 }

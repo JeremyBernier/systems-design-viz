@@ -3,7 +3,8 @@
 // Every entry carries: how it is labelled and drawn (name, vendor, logo), what it
 // teaches (kind, about), how it behaves in the simulation (the per-role fields
 // documented below), and a ballpark monthly cost from public on-demand list prices
-// (AWS us-east-1 / Google Cloud us-central1, rounded; no discounts or free tiers).
+// (AWS us-east-1 / Google Cloud us-central1, rounded; no free tiers). Commitment and
+// spot discounts are applied on top by priced(), to instance-hours only.
 //
 // Shared optional fields:
 //   serverless   – no machine of yours: CPU and memory are the provider's problem
@@ -15,15 +16,49 @@ import {
   siGooglecloudspanner, siApachecassandra, siRabbitmq, siGooglepubsub, siApachekafka, siApacheflink, siApachespark,
   siGoogledataflow, siGooglecloudstorage, siDelta, siClickhouse, siSnowflake, siGooglebigquery, siTrino,
   siGrafana, siApachesuperset, siMetabase, siLooker, siLinux, siSidekiq,
+  siCloudflare, siFastly,
 } from 'simple-icons';
 
 const HOURS = 730; // per month
 const SECONDS = HOURS * 3600;
 const GB = 1e9;
 const TIB = 2 ** 40;
-const vm = (hourly, n = 1) => hourly * HOURS * n;
+// How instance-hours are bought. `mul` multiplies every vm() price and nothing else: per-request,
+// per-GB, storage and licence charges are the same whatever you commit to.
+// Round figures between AWS Compute Savings Plans (c5/m5, no upfront: ~28% off for 1 year,
+// ~50% for 3) and Google committed-use discounts (37% / 55%). Spot is typically 60–70% off.
+export const PRICING = {
+  ondemand: { name: 'On-demand', mul: 1, note: 'On-demand list prices: no commitment, no discounts.' },
+  y1: { name: '1-year commitment', mul: 0.7, note: '1-year commitment (savings plan / committed use): ~30% off instance-hours. You pay for them busy or idle, even if you scale down.' },
+  y3: { name: '3-year commitment', mul: 0.5, note: '3-year commitment (savings plan / committed use): ~50% off instance-hours. You pay for them for three years, even if you scale down.' },
+};
+export const SPOT = { name: 'Spot', mul: 0.35, note: 'Worker VMs on spot capacity: ~65% off, but the provider can reclaim them at two minutes\' notice — fine for retryable jobs (interruptions are not simulated).' };
+let vmMul = 1; // discount in force while priced() runs a cost function
+let vmHit = false; // did that cost function bill any instance-hours?
+const vm = (hourly, n = 1) => ((vmHit = true), hourly * HOURS * n * vmMul);
+// A node's monthly cost under the chosen pricing model → { monthly, model } (model is null if nothing was discounted).
+export function priced(node, params) {
+  const model = node.type === 'worker' && params.spotWorkers ? SPOT : PRICING[params.pricing] || PRICING.ondemand;
+  vmMul = model.mul;
+  vmHit = false;
+  const monthly = node.tech.cost(node, params);
+  vmMul = 1;
+  return { monthly, model: vmHit && model.mul < 1 ? model : null };
+}
 const perMillion = (rate, usd) => ((rate * SECONDS) / 1e6) * usd;
 const gbMonth = (bytesPerSec) => (bytesPerSec / GB) * SECONDS;
+// machines in the tier: shards × (primary + replicas) for a database, nodes for a cache (set by the sim, see datatier.js)
+const fleet = (n) => n.fleet || 1;
+// Volume-tiered price list: tiers = [[up to this many GB, $ per GB], …]
+const tiered = (gb, tiers) => {
+  let usd = 0;
+  let prev = 0;
+  for (const [upTo, rate] of tiers) {
+    usd += Math.max(0, Math.min(gb, upTo) - prev) * rate;
+    prev = upTo;
+  }
+  return usd;
+};
 
 // AWS service icons are not openly licensed, so AWS (and a few others) get a lettered badge instead.
 const AWS = '#ff9900';
@@ -102,62 +137,78 @@ export const TECH = {
   },
 
   // ------------------------------------------------------------------ cache
-  // persist: how warm it is after a restart (0 = empty, 1 = nothing lost)
+  // persist: how warm it is after a restart (0 = empty, 1 = nothing lost) · prices are per cache node
   cache: {
     redis: {
       name: 'Redis', vendor: 'Self-hosted', logo: icon(siRedis), kind: 'In-memory data store on your own VM',
       about: 'An in-memory key-value store with rich data types and optional snapshots to disk. After a crash it reloads the last snapshot, so it comes back partly warm.',
-      persist: 0.6, cost: () => vm(0.2016), basis: 'One r6g.xlarge (32 GB) at $0.20/h',
+      persist: 0.6, cost: (n) => vm(0.2016) * fleet(n), basis: 'One r6g.xlarge (32 GB) at $0.20/h',
     },
     memcached: {
       name: 'Memcached', vendor: 'Self-hosted', logo: badge('MC', '#2a9d8f'), kind: 'In-memory cache on your own VM',
       about: 'The simplest cache: strings in, strings out, nothing written to disk. Multi-threaded and very fast, but a restart always starts from empty.',
-      persist: 0, cost: () => vm(0.2016), basis: 'One r6g.xlarge (32 GB) at $0.20/h',
+      persist: 0, cost: (n) => vm(0.2016) * fleet(n), basis: 'One r6g.xlarge (32 GB) at $0.20/h',
     },
     elasticache: {
       name: 'AWS ElastiCache', vendor: 'AWS', logo: badge('EC', AWS), kind: 'Managed Redis with a replica',
       about: 'Redis run by AWS with a standby replica in another zone. When the primary dies the warm replica takes over in seconds, so the database is barely exposed. You pay for both nodes.',
-      persist: 0.9, restart: 2, cost: () => vm(0.41, 2), basis: 'Two cache.r6g.xlarge nodes (primary + replica) at $0.41/h each',
+      persist: 0.9, restart: 2, cost: (n) => vm(0.41, 2) * fleet(n), basis: 'Two cache.r6g.xlarge nodes (primary + replica) at $0.41/h each',
     },
     memorystore: {
       name: 'Memorystore', vendor: 'Google Cloud', logo: icon(siGooglecloud), kind: 'Managed Redis with a replica',
       about: 'Google Cloud\'s managed Redis. The standard tier keeps a replica and fails over automatically, like ElastiCache. Priced per GB of capacity.',
-      persist: 0.9, restart: 2, cost: () => vm(0.93), basis: '32 GB standard tier at ~$0.029 per GB-hour',
+      persist: 0.9, restart: 2, cost: (n) => vm(0.93) * fleet(n), basis: '32 GB standard tier at ~$0.029 per GB-hour',
     },
   },
 
   // ------------------------------------------------------------------ OLTP database
   // cap: cost units/s (a read = 1) · writeCost · qmax: queries that may wait · conns · crash: reason, or null
+  // repl: the engine takes read replicas (single-primary engines only; the others replicate and partition on their own)
+  //   apply    – cost of replaying a write on a replica, as a share of running it on the primary. Replay skips
+  //              parsing, planning and lock waits but still does the I/O: about half. Aurora replicas share the
+  //              primary's storage volume and only refresh cached pages, so it is far less.
+  //   replay   – share of the primary's top write rate one replica can keep up with. WAL / binlog replay is
+  //              largely serial, so a many-core primary at full tilt outruns its replicas.
+  //   lag      – replication delay in seconds when keeping up (async streaming: tens of ms; Aurora: ~20 ms)
+  //   failover – seconds to detect a dead primary and promote a replica (Patroni's default TTL is 30 s;
+  //              RDS Multi-AZ documents 60–120 s, Cloud SQL about 60 s, Aurora typically under 30 s)
+  // shard: true if the data can be split over several primaries by a shard key (Vitess, Citus, or in the application)
+  // prices are per machine; Aurora replicas share one storage volume, so its storage is billed once
   db: {
     postgres: {
       name: 'PostgreSQL', vendor: 'Self-hosted', logo: icon(siPostgresql), kind: 'OLTP · relational SQL, single primary',
       about: 'An OLTP database: built for many small transactions that read or change a few rows each. Row-oriented storage, strict ACID transactions, joins and indexes. One primary takes all writes, so it scales up (bigger machine) rather than out. Each connection is a whole process, so connections are scarce and the pool is the first thing to run out.',
       cap: 4000, writeCost: 4, qmax: 3000, conns: 500, crash: 'connection pool exhausted',
-      spec: { cores: 16, ramGB: 64, diskGB: 500 }, cost: () => vm(0.768) + 500 * 0.08, basis: 'm5.4xlarge (16 vCPU, 64 GB) at $0.77/h + 500 GB disk; you run it',
+      repl: { apply: 0.5, replay: 0.8, lag: 0.05, failover: 30 }, shard: true,
+      spec: { cores: 16, ramGB: 64, diskGB: 500 }, cost: (n) => (vm(0.768) + 500 * 0.08) * fleet(n), basis: 'm5.4xlarge (16 vCPU, 64 GB) at $0.77/h + 500 GB disk; you run it',
     },
     mysql: {
       name: 'MySQL', vendor: 'Self-hosted', logo: icon(siMysql), kind: 'OLTP · relational SQL, single primary',
       about: 'An OLTP database, like PostgreSQL: row-oriented, transactional, one primary for writes. Connections are threads rather than processes, so it tolerates more of them, and its clustered primary-key index makes simple writes slightly cheaper. The same ceiling applies: one machine takes every write.',
       cap: 4400, writeCost: 3.5, qmax: 4000, conns: 1500, crash: 'out of memory (too many connection threads)',
-      spec: { cores: 16, ramGB: 64, diskGB: 500 }, cost: () => vm(0.768) + 500 * 0.08, basis: 'm5.4xlarge (16 vCPU, 64 GB) at $0.77/h + 500 GB disk; you run it',
+      repl: { apply: 0.5, replay: 0.8, lag: 0.05, failover: 30 }, shard: true,
+      spec: { cores: 16, ramGB: 64, diskGB: 500 }, cost: (n) => (vm(0.768) + 500 * 0.08) * fleet(n), basis: 'm5.4xlarge (16 vCPU, 64 GB) at $0.77/h + 500 GB disk; you run it',
     },
     rds: {
       name: 'AWS RDS', vendor: 'AWS', logo: badge('RDS', AWS), kind: 'OLTP · managed PostgreSQL',
       about: 'PostgreSQL operated by AWS: backups, patching and failover to a standby are handled for you. The engine and its limits are unchanged — one primary, scarce connections — you are paying roughly double the VM price for the operations work.',
       cap: 4000, writeCost: 4, qmax: 3000, conns: 500, crash: 'connection pool exhausted', restart: 5,
-      spec: { cores: 16, ramGB: 64, diskGB: 500 }, cost: () => vm(1.42) + 500 * 0.115, basis: 'db.m5.4xlarge at $1.42/h + 500 GB at $0.115 per GB',
+      repl: { apply: 0.5, replay: 0.8, lag: 0.05, failover: 60 }, shard: true,
+      spec: { cores: 16, ramGB: 64, diskGB: 500 }, cost: (n) => (vm(1.42) + 500 * 0.115) * fleet(n), basis: 'db.m5.4xlarge at $1.42/h + 500 GB at $0.115 per GB',
     },
     aurora: {
       name: 'AWS Aurora', vendor: 'AWS', logo: badge('AU', AWS), kind: 'OLTP · cloud-native relational',
       about: 'A PostgreSQL/MySQL-compatible database with storage rebuilt for the cloud: data is replicated six ways across zones and grows automatically, so the disk never fills. Faster failover and somewhat higher throughput than stock PostgreSQL; writes still go through one primary.',
       cap: 5000, writeCost: 3.5, qmax: 3500, conns: 1000, crash: 'connection pool exhausted', restart: 3, managedDisk: true,
-      spec: { cores: 16, ramGB: 128, diskGB: 500 }, cost: (n) => vm(2.08) + n.storedGB * 0.1, basis: 'db.r6g.4xlarge at $2.08/h + $0.10 per GB stored',
+      repl: { apply: 0.1, replay: 1, lag: 0.02, failover: 30 }, shard: true,
+      spec: { cores: 16, ramGB: 128, diskGB: 500 }, cost: (n) => vm(2.08) * fleet(n) + n.storedGB * 0.1, basis: 'db.r6g.4xlarge at $2.08/h + $0.10 per GB stored',
     },
     cloudsql: {
       name: 'Cloud SQL', vendor: 'Google Cloud', logo: icon(siGooglecloud), kind: 'OLTP · managed PostgreSQL',
       about: 'Google Cloud\'s managed PostgreSQL/MySQL — the counterpart of RDS. Same engine and same single-primary limits, with backups and failover run for you.',
       cap: 4000, writeCost: 4, qmax: 3000, conns: 500, crash: 'connection pool exhausted', restart: 5,
-      spec: { cores: 16, ramGB: 64, diskGB: 500 }, cost: () => vm(1.5) + 500 * 0.17, basis: '16 vCPU + 64 GB at ~$1.50/h + 500 GB SSD at $0.17 per GB',
+      repl: { apply: 0.5, replay: 0.8, lag: 0.05, failover: 60 }, shard: true,
+      spec: { cores: 16, ramGB: 64, diskGB: 500 }, cost: (n) => (vm(1.5) + 500 * 0.17) * fleet(n), basis: '16 vCPU + 64 GB at ~$1.50/h + 500 GB SSD at $0.17 per GB',
     },
     spanner: {
       name: 'Cloud Spanner', vendor: 'Google Cloud', logo: icon(siGooglecloudspanner), kind: 'OLTP · distributed SQL',
@@ -246,7 +297,7 @@ export const TECH = {
     msk: {
       name: 'AWS MSK', vendor: 'AWS', logo: badge('MSK', AWS), kind: 'Managed Kafka',
       about: 'Real Apache Kafka, with AWS running the brokers, patching and replacing failed ones. Identical behaviour to self-hosted Kafka at roughly twice the machine price.',
-      cap: 25000, retention: 150000, restart: 4, cost: () => vm(0.84) + 2000 * 0.1, basis: 'kafka.m5.2xlarge broker at $0.84/h + 2 TB storage',
+      cap: 25000, retention: 150000, restart: 4, cost: () => 0.84 * HOURS + 2000 * 0.1, // not vm(): MSK brokers have no reserved or savings-plan pricing basis: 'kafka.m5.2xlarge broker at $0.84/h + 2 TB storage',
     },
     kinesis: {
       name: 'AWS Kinesis', vendor: 'AWS', logo: badge('KDS', AWS), kind: 'Managed stream (shards)', serverless: true,
@@ -256,7 +307,7 @@ export const TECH = {
     pubsub: {
       name: 'Pub/Sub', vendor: 'Google Cloud', logo: icon(siGooglepubsub), kind: 'Managed messaging', serverless: true, managedDisk: true,
       about: 'Google Cloud\'s serverless messaging. No partitions or shards to size — it scales with traffic — and each subscriber keeps its own backlog. Billed by data volume, so cost rises directly with event rate.',
-      cap: 100000, retention: 150000, cost: (n) => (((n.inRate + n.outRate) * 2e3 * SECONDS) / TIB) * 40, basis: '$40 per TiB published and delivered (~2 kB per event)',
+      cap: 100000, retention: 150000, cost: (n, p) => (((n.inRate + n.outRate) * p.eventBytes * SECONDS) / TIB) * 40, basis: '$40 per TiB published and delivered (~2 kB per event)',
     },
   },
 
@@ -276,7 +327,7 @@ export const TECH = {
     firehose: {
       name: 'Data Firehose', vendor: 'AWS', logo: badge('FH', AWS), kind: 'Managed delivery stream', serverless: true,
       about: 'A fully managed pipe from a stream into storage: no code and no cluster. It buffers for about a minute and writes large Parquet files, so there is almost no small-files problem — but data is a minute late and you cannot run custom logic.',
-      cap: 10000, files: 0.05, cost: (n) => gbMonth(n.outRate * 2e3) * 0.047, basis: '$0.029 per GB ingested + $0.018 per GB converted to Parquet',
+      cap: 10000, files: 0.05, cost: (n, p) => gbMonth(n.outRate * p.eventBytes) * 0.047, basis: '$0.029 per GB ingested + $0.018 per GB converted to Parquet',
     },
     dataflow: {
       name: 'Dataflow', vendor: 'Google Cloud', logo: icon(siGoogledataflow), kind: 'Managed stream processor',
@@ -331,7 +382,7 @@ export const TECH = {
       about: 'A serverless OLAP warehouse: no machines, no sizing. Each query borrows compute "slots" from a huge shared pool, so concurrency is rarely the limit and nothing can crash. The cost is latency — even a small query takes around a second — and you pay per byte scanned, which adds up fast under constant dashboard traffic.',
       cores: 100, qCost: 0.2, shared: false, parts: false, crash: false, baseLat: 1.0, ingestDelay: 3, insertMax: 20000, qmax: 2000,
       spec: { cores: 0, ramGB: 0, diskGB: 1000 },
-      cost: (n) => ((n.outRate * 200e6 * SECONDS) / TIB) * 6.25 + gbMonth(n.insertRate * 2e3) * 0.05 + n.diskGB * 0.02,
+      cost: (n, p) => ((n.outRate * 200e6 * SECONDS) / TIB) * 6.25 + gbMonth(n.insertRate * p.eventBytes) * 0.05 + n.diskGB * 0.02,
       basis: 'On demand: $6.25 per TiB scanned (assuming 200 MB per query), plus streaming inserts and storage',
     },
   },
@@ -389,11 +440,69 @@ export const TECH = {
       cost: () => 0, basis: 'Free; you pay for the queries it runs',
     },
   },
+
+  // ------------------------------------------------------------------ CDN
+  // fill: $ per GB the origin charges for sending cache misses to this CDN (see cost.js)
+  // Egress prices are the North America / Europe list rates; other regions cost up to twice as much.
+  cdn: {
+    cloudfront: {
+      name: 'CloudFront', vendor: 'AWS', logo: badge('CF', AWS), kind: 'CDN · pay per GB', serverless: true, managedDisk: true,
+      about: 'AWS\'s content delivery network. Several hundred edge locations cache your objects close to users. You pay per GB delivered, on a sliding scale that gets cheaper with volume, plus a small fee per request. Fetching misses from an AWS origin such as S3 is free, which makes the pair cheaper than serving the same bytes from S3 or EC2 directly.',
+      fill: 0,
+      cost: (n) => tiered(gbMonth(n.edgeBytes), [[10e3, 0.085], [50e3, 0.08], [150e3, 0.06], [500e3, 0.04], [1024e3, 0.03], [5e6, 0.025], [Infinity, 0.02]]) + perMillion(n.outRate, 1.0),
+      basis: '$0.085 per GB for the first 10 TB a month, falling in tiers to $0.02 above 5 PB, + $1 per million HTTPS requests',
+    },
+    cloudcdn: {
+      name: 'Cloud CDN', vendor: 'Google Cloud', logo: icon(siGooglecloud), kind: 'CDN · pay per GB', serverless: true, managedDisk: true,
+      about: 'Google Cloud\'s CDN, served from the same edge network as Google\'s own products. Priced per GB delivered with volume tiers, plus a fee per cache lookup. Unlike CloudFront, filling the cache from your origin is also charged, at a low per-GB rate.',
+      fill: 0.01,
+      cost: (n) => tiered(gbMonth(n.edgeBytes), [[10e3, 0.08], [150e3, 0.055], [500e3, 0.03], [Infinity, 0.02]]) + perMillion(n.outRate, 0.75),
+      basis: '$0.08 per GB for the first 10 TB a month, falling to $0.02 above 500 TB, + $0.75 per million lookups; cache fill $0.01 per GB',
+    },
+    cloudflare: {
+      name: 'Cloudflare', vendor: 'Cloudflare', logo: icon(siCloudflare), kind: 'CDN · flat plan', serverless: true, managedDisk: true,
+      about: 'A CDN sold as a flat monthly plan rather than per GB: ordinary websites pay the same whatever their traffic. That stops at media scale: serving large volumes of video or images needs a negotiated enterprise contract. Because it is a separate company from your cloud, every cache miss also leaves your cloud at its normal internet egress price, unless the origin is a store with free egress such as Cloudflare R2.',
+      fill: 0.09,
+      cost: (n) => 200 + Math.max(0, gbMonth(n.edgeBytes) - 100e3) * 0.01,
+      basis: 'Business plan at $200 a month. Above ~100 TB a month this assumes an enterprise contract at ~$0.01 per GB, which is an estimate: those prices are negotiated, not published',
+    },
+    fastly: {
+      name: 'Fastly', vendor: 'Fastly', logo: icon(siFastly), kind: 'CDN · pay per GB', serverless: true, managedDisk: true,
+      about: 'A CDN known for purging cached objects worldwide in a fraction of a second and for running your own logic at the edge, which lets you cache content that changes often. Its list price per GB is the highest here; large customers negotiate it down. As with any third-party CDN, cache misses leave your cloud at its normal egress price.',
+      fill: 0.09,
+      cost: (n) => Math.max(50, tiered(gbMonth(n.edgeBytes), [[10e3, 0.12], [Infinity, 0.08]]) + perMillion(n.outRate, 0.75)),
+      basis: '$0.12 per GB for the first 10 TB a month, then $0.08, + $0.75 per million requests ($50 minimum)',
+    },
+  },
+
+  // ------------------------------------------------------------------ object storage (node id "blob")
+  // egressFree: reading objects out to the internet or a CDN is not charged per GB
+  blob: {
+    s3: {
+      name: 'Amazon S3', vendor: 'AWS', logo: badge('S3', AWS), kind: 'Object storage', serverless: true, managedDisk: true,
+      about: 'The original cloud object store: put a file under a key, get it back over HTTP. No capacity to plan, and objects are copied across three zones. Storage itself is cheap; the charges that surprise people are per request and, above all, per GB read out to the internet.',
+      cost: (n) => tiered(n.storedGB, [[50e3, 0.023], [500e3, 0.022], [Infinity, 0.021]]) + (n.putRate * 0.000005 + n.getRate * 0.0000004) * SECONDS,
+      basis: '$0.023 per GB-month (less above 50 TB) + $0.005 per 1,000 PUTs + $0.0004 per 1,000 GETs',
+    },
+    gcs: {
+      name: 'Cloud Storage', vendor: 'Google Cloud', logo: icon(siGooglecloudstorage), kind: 'Object storage', serverless: true, managedDisk: true,
+      about: 'Google Cloud\'s object store, the counterpart of S3: buckets of objects fetched by key, unlimited capacity, priced per GB stored and per operation, with reads out to the internet billed per GB.',
+      cost: (n) => n.storedGB * 0.02 + (n.putRate * 0.000005 + n.getRate * 0.0000004) * SECONDS,
+      basis: '$0.020 per GB-month + $0.005 per 1,000 writes + $0.0004 per 1,000 reads',
+    },
+    r2: {
+      name: 'Cloudflare R2', vendor: 'Cloudflare', logo: icon(siCloudflare), kind: 'Object storage · no egress fee', serverless: true, managedDisk: true, egressFree: true,
+      about: 'An S3-compatible object store whose selling point is one missing line on the bill: it does not charge for data read out. Storage is cheaper per GB too, and you still pay per request. For media that is read far more often than it is written, the egress fee is most of what an object store costs.',
+      cost: (n) => n.storedGB * 0.015 + (n.putRate * 0.0000045 + n.getRate * 0.00000036) * SECONDS,
+      basis: '$0.015 per GB-month + $4.50 per million writes + $0.36 per million reads; no charge per GB read out',
+    },
+  },
 };
 
 export const DEFAULT_TECH = {
   lb: 'nginx', web: 'ec2', cache: 'redis', db: 'postgres', queue: 'rabbitmq', worker: 'ec2',
   kafka: 'kafka', consumer: 'flink', lake: 's3iceberg', clickhouse: 'clickhouse', trino: 'trino', bi: 'grafana',
+  cdn: 'cloudfront', blob: 's3',
 };
 
 export { HOURS, SECONDS, GB };

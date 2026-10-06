@@ -1,4 +1,8 @@
 import { TECH, DEFAULT_TECH } from './tech.js';
+import { DATA_DEFAULTS, CACHE_NODE_CAP, partialLoss, heal, cacheCluster, cacheStatus, dbCluster, dbStatus } from './datatier.js';
+import { ASSET_DEFAULTS, newAssetStats, assetTraffic, addAssetLoad } from './cdn.js';
+import { initReliability, reliability, recordReliability } from './latency.js';
+import { AUTO_PARAMS, trafficShape, scaleWeb, scaleWorkers } from './autoscale.js';
 
 // Rate-based ("fluid") simulation of a small web service.
 // Every node has a capacity, a bounded backlog, and four hardware resources
@@ -23,6 +27,11 @@ export const EDGE_TYPES = [
   ['bi', 'clickhouse'],
   ['bi', 'trino'],
   ['trino', 'lake'],
+  // static assets and media: clients fetch them from the CDN, which pulls misses from object storage.
+  // API requests keep their own hostname and go straight to the load balancer, so there is no cdn → lb edge.
+  ['client', 'cdn'],
+  ['cdn', 'blob'],
+  ['web', 'blob'], // uploads, and asset reads when there is no CDN
 ];
 export const HISTORY = 240; // samples kept per metric (4 per second → 60s)
 
@@ -30,8 +39,37 @@ export const HISTORY = 240; // samples kept per metric (4 per second → 60s)
 const REQ_BYTES = 20e3;
 const EVENT_BYTES = 2e3;
 const PARQUET_RATIO = 6; // raw JSON events → compressed columnar Parquet
+export const WEB_THREADS = 256; // request threads per web server
+// Workload assumptions: properties of the product, not of any technology. They are the
+// defaults of the matching Sim.params, which the user (or a preset) may override.
+export const WORKLOAD = {
+  reqBytes: REQ_BYTES,
+  eventBytes: EVENT_BYTES,
+  cacheHitRatio: 0.85, // share of reads a warm cache answers
+  jobFrac: 0.15, // share of requests that enqueue a background job
+  // Stored per write, indexes and log included. Hugely inflated (a real row is ~1 kB) so a
+  // 500 GB disk fills while you watch: ~1% per 12,000 writes.
+  writeBytes: (500 / 1.2e6) * 1e9,
+  svcTime: 0.02, // seconds a request spends in application code, holding a thread
+  webRps: 1200, // requests/s one baseline 8-vCPU server handles before its CPU saturates
+  jobRate: 120, // jobs/s one baseline 4-vCPU worker completes
+};
+// How each assumption is shown and edited: display unit, bytes/seconds per unit, allowed range.
+export const WORKLOAD_INFO = {
+  reqBytes: { label: 'Request + response size', unit: 'kB', scale: 1e3, min: 0.1, max: 5000, tip: 'Average bytes on the wire per request. Sets bandwidth everywhere on the request path.' },
+  cacheHitRatio: { label: 'Cache hit ratio when warm', unit: '%', scale: 0.01, min: 0, max: 100, tip: 'Share of reads answered from RAM. The rest fall through to the database.' },
+  jobFrac: { label: 'Requests that enqueue a job', unit: '%', scale: 0.01, min: 0, max: 100, tip: 'Share of requests that leave slow work (email, thumbnails) on the job queue.' },
+  eventBytes: { label: 'Event size', unit: 'kB', scale: 1e3, min: 0.05, max: 1000, tip: 'Bytes per event published to the stream; every request publishes one.' },
+  writeBytes: { label: 'Stored per write', unit: 'kB', scale: 1e3, min: 0.01, max: 1e5, tip: 'Database bytes per write, indexes included. The default is inflated ~400× so the disk fills while you watch; a real row is nearer 1 kB.' },
+  svcTime: { label: 'App time per request', unit: 'ms', scale: 1e-3, min: 1, max: 2000, tip: 'Wall-clock time in your own code per request. Each request holds one of 256 threads for this long plus the database wait.' },
+  webRps: { label: 'Server throughput', unit: 'req/s', scale: 1, min: 10, max: 20000, tip: 'Requests/s one 8-vCPU server handles before its CPU saturates. Measure it with a load test: 1,200 means ~7 ms of CPU per request.' },
+  jobRate: { label: 'Worker throughput', unit: 'jobs/s', scale: 1, min: 1, max: 5000, tip: 'Jobs/s one 4-vCPU worker completes.' },
+};
 // Link speed of each machine's network card, in bits per second.
 export const NIC_BPS = { client: 10e9, lb: 10e9, web: 1e9, cache: 1e9, db: 1e9, kafka: 1e9, consumer: 1e9, queue: 1e9, worker: 1e9, lake: 10e9, clickhouse: 10e9, trino: 10e9, bi: 1e9 };
+// Managed services have no card of yours; these are the slice of the provider's network a system this size could draw on.
+NIC_BPS.cdn = 400e9;
+NIC_BPS.blob = 100e9;
 
 // Hardware fitted to each machine. Workers are a pool: totals scale with the worker count.
 export const SPECS = {
@@ -48,6 +86,8 @@ export const SPECS = {
   clickhouse: { cores: 16, ramGB: 64, diskGB: 1000 },
   trino: { cores: 16, ramGB: 64, diskGB: 200 },
   bi: { cores: 4, ramGB: 8, diskGB: 100 },
+  cdn: { cores: 0, ramGB: 0, diskGB: 0 }, // the provider's edge network
+  blob: { cores: 0, ramGB: 0, diskGB: 0 }, // managed object storage
 };
 
 export function fmtGB(gb) {
@@ -62,7 +102,7 @@ export function rawMetric(node, key, params) {
   if (node.serverless && (key === 'cpu' || key === 'mem')) return 'managed by the cloud provider';
   if (node.managedDisk && key === 'disk') return `${fmtGB(node.storedGB)} stored · no fixed limit`;
   const spec = node.spec || SPECS[node.type];
-  const n = node.type === 'worker' ? params.workerCount : 1;
+  const n = node.type === 'worker' ? params.workerCount : node.fleet || 1; // database and cache report their whole fleet
   if (key === 'cpu') return `${(node.cpu * spec.cores * n).toFixed(1)} / ${spec.cores * n} cores`;
   if (key === 'mem') return `${fmtGB(node.mem * spec.ramGB * n)} / ${fmtGB(spec.ramGB * n)}`;
   if (key === 'disk') return `${fmtGB(node.disk * spec.diskGB * n)} / ${fmtGB(spec.diskGB * n)}`;
@@ -152,6 +192,18 @@ export const NODE_INFO = {
     about:
       'Pull jobs off the queue one at a time. Throughput scales with the number of workers, so this tier is easy to scale horizontally.',
   },
+  cdn: {
+    title: 'CDN',
+    kind: 'Content delivery network',
+    about:
+      'Thousands of caching servers close to users. Images, scripts and video are fetched once from your origin and then served from the edge, so most bytes never touch your load balancer or web servers. How much it absorbs is the cache hit ratio, which depends on how long objects may be cached (the TTL) and how popular they are. Remove it and every one of those bytes has to squeeze through your web servers\' network cards.',
+  },
+  blob: {
+    title: 'Object Storage',
+    kind: 'Blob store for media and static assets',
+    about:
+      'Where the files live: uploaded photos and videos, plus the site\'s scripts and stylesheets. Each object is stored under a key, replicated across zones, and fetched over HTTP. Capacity is unlimited and you pay per GB stored, per request and per GB read out to the internet. It is the CDN\'s origin: only cache misses and uploads reach it.',
+  },
 };
 
 function makeNode(id, type, extra = {}) {
@@ -187,12 +239,18 @@ export class Sim {
       traffic: 600, // requests / second
       writePct: 10, // % of requests that write
       workerCount: 2,
+      ...AUTO_PARAMS, // traffic pattern + autoscaling settings (autoscale.js)
       autoRestart: true,
       tech: { ...DEFAULT_TECH }, // which concrete technology each kind of component is
       queryRate: 10, // analytics queries / second
       compaction: true, // Iceberg small-file compaction
+      ...WORKLOAD,
+      pricing: 'ondemand', // key of PRICING in tech.js: how instance-hours are bought
+      spotWorkers: false, // run worker VMs on spot capacity (changes cost only)
+      ...DATA_DEFAULTS, // dbReplicas, dbShards, cacheNodes (datatier.js)
     };
     this.listeners = { crash: [], recover: [], log: [] };
+    Object.assign(this.params, ASSET_DEFAULTS); // static asset / media profile, see cdn.js
     this.reset();
   }
 
@@ -221,10 +279,17 @@ export class Sim {
     n.queue = makeNode('queue', 'queue');
     n.worker = makeNode('worker', 'worker');
     n.kafka.lagCH = 0;
+    // data tier (datatier.js): machines lost from the cluster, failover countdown, unreplicated writes
+    Object.assign(n.cache, { lostNodes: 0, rejoinIn: 0 });
+    Object.assign(n.db, { lostNodes: 0, rejoinIn: 0, failover: 0, replBacklog: 0, replLag: 0 });
     n.lake = makeNode('lake', 'lake', { serverless: true, managedDisk: true, storedGB: 1240, smallFiles: 0, bigFiles: 3200, files: 3200, snapshots: 8600, putRate: 0, getRate: 0, ingestBytes: 0 });
     n.clickhouse = makeNode('clickhouse', 'clickhouse', { parts: 20, diskGB: 380, insertRate: 0, tooManyParts: false });
     n.trino = makeNode('trino', 'trino', { cost: 2 });
     n.bi = makeNode('bi', 'bi');
+    const objects = this.params.assetObjects;
+    n.cdn = makeNode('cdn', 'cdn', { warm: 1, hitRatio: 0, hit: 0, missRate: 0, edgeBytes: 0, storedGB: 0 });
+    n.blob = makeNode('blob', 'blob', { objects, storedGB: (objects * this.params.assetKB) / 1e6, putRate: 0, getRate: 0 });
+    this.assets = newAssetStats();
     this.nodes = n;
     for (const type in this.params.tech) this.setTech(type, this.params.tech[type], true);
     // every sensible connection starts wired up
@@ -237,11 +302,12 @@ export class Sim {
     this.bottleneck = null;
     this.history = {};
     this._histAcc = 0;
+    initReliability(this); // percentiles, retries and SLO state (latency.js)
   }
 
   // Rebuild the system from a preset: components, technologies and traffic shape.
   applyPreset(preset) {
-    Object.assign(this.params, preset.params, { tech: { ...DEFAULT_TECH, ...preset.tech } });
+    Object.assign(this.params, WORKLOAD, DATA_DEFAULTS, preset.params, preset.workload, preset.data, { tech: { ...DEFAULT_TECH, ...preset.tech } });
     this.reset();
     while (this.webCount < preset.webs) this.setActive(this.webs.find((w) => !w.active).id, true);
     for (const id of preset.remove) this.nodes[id].active = false;
@@ -341,6 +407,8 @@ export class Sim {
   kill(id, reason = 'Killed manually') {
     const node = this.nodes[id];
     if (!node || node.down || !node.active) return;
+    if (partialLoss(this, node, reason)) return; // a cache cluster or replicated database loses one machine, not the whole tier
+    if (node.lostNodes || node.failover) node.lostNodes = node.failover = 0; // the whole tier is gone and restarts as one
     node.down = true;
     node.downFor = 0;
     node.queue = 0;
@@ -360,6 +428,11 @@ export class Sim {
     if (node.type === 'cache') node.warm = node.tech.persist; // what survived the restart
     this.emit('recover', node);
     this.emit('log', 'good', `${node.label} restarted`);
+  }
+
+  // Bring back machines lost from the cache cluster or the database's replica set.
+  heal(id) {
+    heal(this, id);
   }
 
   freeDisk() {
@@ -391,11 +464,16 @@ export class Sim {
 
     const E = this.edges;
     const off = (n) => n.down || !n.active; // crashed or not in the diagram
-    const JOB_FRAC = 0.15; // share of requests that enqueue a background job
+    const JOB_FRAC = p.jobFrac; // share of requests that enqueue a background job
+    // workload assumptions are params: these shadow the module-level defaults for the whole step
+    const REQ_BYTES = p.reqBytes;
+    const EVENT_BYTES = p.eventBytes;
+    N.cache.hitRatio = p.cacheHitRatio;
 
     // ---------- clients ----------
     const wobble = 1 + 0.05 * Math.sin(this.time * 1.7) + 0.03 * Math.sin(this.time * 5.3);
-    const incoming = p.traffic * wobble * (this.spike > 0 ? 4 : 1);
+    const shape = trafficShape(this, dt); // daily cycle / ramp / flash crowd (autoscale.js); 1 when steady
+    const incoming = p.traffic * wobble * (this.spike > 0 ? 4 : 1) * shape + this.rel.retryRate; // + client retries of last step's failures
     const client = N.client;
     client.inRate = client.outRate = incoming;
     client.util = clamp(incoming / 20000);
@@ -403,6 +481,9 @@ export class Sim {
     client.mem = 0.3;
     client.disk = 0.2;
     client.bps = incoming * REQ_BYTES * 8;
+
+    // ---------- static assets + media: CDN → object storage (see cdn.js) ----------
+    assetTraffic(this, incoming - this.rel.retryRate, dt, NIC_BPS); // a retried API call does not re-fetch the page's assets
 
     // ---------- load balancer ----------
     const lb = N.lb;
@@ -424,8 +505,11 @@ export class Sim {
       : !alive.length
         ? 'No healthy web servers to route to. Every request fails with 503.'
         : `Routing across ${alive.length} healthy server${alive.length > 1 ? 's' : ''}.`;
+    addAssetLoad(lb); // assets falling back to the origin path when there is no CDN
 
     // ---------- web servers ----------
+    // autoscaling (autoscale.js): run the scaling policy; servers still launching leave `alive` and take no traffic
+    if (!scaleWeb(this, dt, alive, lbOut)) lbOut = 0;
     const db = N.db;
     const cache = N.cache;
     const cacheUp = !off(cache);
@@ -440,10 +524,9 @@ export class Sim {
     const hit = cacheUp ? cache.hitRatio * cache.warm : 0;
 
     const webTech = this.techOf('web');
-    const WEB_CPU_CAP = 1200 * webTech.capMul; // rps one server can handle
-    const WEB_THREADS = 256;
+    const WEB_CPU_CAP = p.webRps * webTech.capMul; // rps one server can handle
     const WEB_QMAX = 2400;
-    const SVC = 0.02;
+    const SVC = p.svcTime;
     let webServed = 0;
     let webDrop = 0;
     let webLatSum = 0;
@@ -457,6 +540,7 @@ export class Sim {
     let eventsIn = 0;
     let jobsArr = 0;
     for (const w of this.webs) {
+      if (w.launching > 0) continue; // still booting (autoscale.js)
       if (off(w)) {
         w._cache = w._db = w._events = w._jobs = 0;
         w.inRate = w.outRate = w.dropRate = w.util = w.cpu = w.mem = w.bps = 0;
@@ -470,6 +554,8 @@ export class Sim {
       const missOK = viaCache ? missViaCache || dbLink : dbLink;
       const hitW = viaCache ? hit : 0;
       const downstream = (1 - wf) * (hitW * 0.001 + (1 - hitW) * (missOK ? dbLat : FAIL_FAST)) + wf * (dbLink ? dbLat : FAIL_FAST);
+      // the same three paths, kept apart for the percentile maths: [share, mean seconds, waits on the database]
+      w._mix = [[(1 - wf) * hitW, SVC + 0.001, false], [(1 - wf) * (1 - hitW), SVC + (missOK ? dbLat : FAIL_FAST), missOK], [wf, SVC + (dbLink ? dbLat : FAIL_FAST), dbLink]];
       const threadCap = WEB_THREADS / (SVC + downstream);
       // no two machines are identical: the weakest one tips over first
       const cpuCap = WEB_CPU_CAP * (1 - 0.035 * w.index);
@@ -494,6 +580,7 @@ export class Sim {
       w.mem = ease(w.mem, clamp(0.22 + 0.2 * w.threads + 0.58 * (w.queue / WEB_QMAX)), dt);
       w.disk = 0.18;
       w.bps = rate * REQ_BYTES * 8;
+      w.latency += w.coldLat || 0; // serverless cold start on a just-added environment (autoscale.js)
       const threadBound = threadCap < cpuCap;
       w.status =
         w.util < 0.7
@@ -524,6 +611,7 @@ export class Sim {
       else noRoute += wr;
       eventsIn += w._events;
       jobsArr += w._jobs;
+      addAssetLoad(w); // asset bytes this server streams when there is no CDN
       if (!dbLink && !viaCache) w.status = 'Not connected to a database or cache, so it has nowhere to read or write data. Every request fails.';
       else if (!dbLink) w.status = 'No database connection: cached reads work, but every write fails.';
       webDrop += dropped / dt;
@@ -533,7 +621,7 @@ export class Sim {
 
     // ---------- cache ----------
     const reads = cacheLookups;
-    const CACHE_CAP = 30000;
+    const CACHE_CAP = CACHE_NODE_CAP * cacheCluster(this, dt); // per node × nodes up
     if (cacheUp) {
       const served = reads;
       // warms up as traffic repopulates it (~10s at normal load)
@@ -551,6 +639,9 @@ export class Sim {
         cache.warm < 0.6
           ? `Cold cache: only ${Math.round(hit * 100)}% of reads hit. The rest stampede to the database while it warms up.`
           : `Warm. ${Math.round(hit * 100)}% of reads are answered from RAM and never touch the database.`;
+      // --- cache cluster (datatier.js)
+      cache.cap = CACHE_CAP;
+      cache.status = cacheStatus(cache, hit) || cache.status;
     } else {
       cache.inRate = cache.outRate = cache.missRate = cache.util = cache.cpu = cache.bps = 0;
       cache.mem = ease(cache.mem, 0, dt, 0.2);
@@ -562,13 +653,15 @@ export class Sim {
 
     // ---------- database ----------
     const eng = this.techOf('db');
-    const DB_CAP = eng.cap; // cost units / s (a read = 1)
-    const DB_QMAX = eng.qmax;
+    let DB_CAP = eng.cap; // cost units / s (a read = 1)
+    let DB_QMAX = eng.qmax;
     const WRITE_COST = eng.writeCost;
     db.readOnly = !eng.managedDisk && db.diskUsed >= 0.999;
     let dbReadOk = 0;
     let dbWriteOk = 0;
     let dbFail = 0;
+    // --- replicas, shards and failover (datatier.js): capacity of the whole tier for this read/write mix
+    const tier = dbCluster(this, dt, dbReadsArr, db.readOnly ? 0 : writes);
     if (off(db)) {
       dbFail = dbReadsArr + writes;
       db.inRate = dbReadsArr + writes;
@@ -576,9 +669,12 @@ export class Sim {
       db.latency = 1;
       db.status = 'Down. Cached reads still work; everything else fails.';
     } else {
-      const wArr = db.readOnly ? 0 : writes;
+      const wArr = db.readOnly ? 0 : writes - tier.failW;
       if (db.readOnly) dbFail += writes;
+      dbFail += tier.failW; // writes to a shard whose primary is being replaced
       const units = dbReadsArr + wArr * WRITE_COST;
+      DB_CAP = tier.cap;
+      DB_QMAX = tier.qmax;
       db.queue += units * dt;
       const servedU = Math.min(db.queue, DB_CAP * dt);
       db.queue -= servedU;
@@ -605,8 +701,8 @@ export class Sim {
       db.bps = (dbReadOk + dbWriteOk) * 8e3 * 8;
       // a write hits the log and the data file; most reads are served from the buffer pool
       db.diskIO = dbWriteOk * 16e3 + dbReadOk * 1e3;
-      // each write stores data: ~1% of disk per 12,000 writes
-      const grown = db.diskUsed + (dbWriteOk * dt * 500) / 1.2e6 / eng.spec.diskGB;
+      // each write stores data: by default ~1% of disk per 12,000 writes
+      const grown = db.diskUsed + (dbWriteOk * dt * p.writeBytes) / 1e9 / eng.spec.diskGB / tier.S; // each shard stores its slice
       db.diskUsed = eng.managedDisk ? grown : clamp(grown);
       db.status = db.readOnly
         ? 'Disk full. The database has gone read-only: every write is rejected. Add storage to recover.'
@@ -619,6 +715,7 @@ export class Sim {
               : eng.crash
                 ? 'Overloaded. Queries pile up, connections run out, and web servers stall waiting for answers.'
                 : 'Overloaded. Latency climbs and requests time out; add nodes to add capacity.';
+      db.status = dbStatus(db, tier, fmtDur) || db.status;
       if (eng.crash) this._stress(db, db.queue >= DB_QMAX * 0.98, db.util, dt, eng.crash);
       else db.stress = 0;
     }
@@ -627,6 +724,10 @@ export class Sim {
     db.maxConns = eng.conns;
     db.capUnits = eng.cap;
     db.writeCost = eng.writeCost;
+    // --- data tier: figures for the whole fleet (datatier.js)
+    db.storedGB *= tier.S;
+    db.maxConns = eng.conns * tier.nodes;
+    db.capUnits = DB_CAP;
 
     // ---------- kafka → two consumer groups (lake writer, ClickHouse) ----------
     const kafka = N.kafka;
@@ -877,7 +978,7 @@ export class Sim {
     const queue = N.queue;
     const worker = N.worker;
     const Q_MAX = this.techOf('queue').qmax;
-    const WORKER_RATE = 120 * this.techOf('worker').rateMul;
+    const WORKER_RATE = p.jobRate * this.techOf('worker').rateMul;
     queue.qmax = Q_MAX;
     worker.cap = p.workerCount * WORKER_RATE;
     const jobsIn = jobsArr;
@@ -922,6 +1023,7 @@ export class Sim {
       : worker.util > 1
         ? `All ${p.workerCount} workers are busy. Add workers to drain the queue faster.`
         : `${p.workerCount} worker${p.workerCount > 1 ? 's' : ''} keeping up.`;
+    scaleWorkers(this, dt); // autoscaling on queue depth (autoscale.js); changes p.workerCount for the next step
 
     // network utilisation = bits on the wire ÷ link speed
     for (const id in N) {
@@ -942,6 +1044,9 @@ export class Sim {
     t.err = ease(t.err, err, dt, 0.3);
     t.errPct = t.ok + t.err > 0 ? t.err / (t.ok + t.err) : 0;
     t.latency = ease(t.latency, webServed > 0 ? Math.min(webLat, 10) : 0, dt, 0.3);
+
+    // ---------- latency percentiles, client timeouts + retries, SLO ----------
+    reliability(this, dt, incoming, ok, err);
 
     // ---------- flows for the renderer ----------
     const f = this.flows;
@@ -1009,6 +1114,7 @@ export class Sim {
     push('ok', this.totals.ok);
     push('err', this.totals.err);
     push('latency', this.totals.latency * 1000);
+    recordReliability(this, push);
     for (const id in this.nodes) {
       const n = this.nodes[id];
       push(id + '.cpu', n.cpu * 100);

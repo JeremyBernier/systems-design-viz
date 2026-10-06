@@ -1,6 +1,6 @@
 # System Design Simulator
 
-Made by Jeremy Bernier: [X](https://x.com/jeremybernier) · [jbernier.com](https://jbernier.com)
+Made by Jeremy Bernier: [X](https://x.com/jeremybernier) · [jbernier.com](https://jbernier.com) · [LinkedIn](https://www.linkedin.com/in/jeremysbernier/)
 
 Interactive 3D visualization of a small web service under load: clients → load balancer → web servers → cache / database, plus a job queue with workers, and an analytics side fed by Kafka: a lake writer committing Parquet files to an S3 + Iceberg data lake, ClickHouse for real-time queries, Trino for SQL on the lake, and dashboards querying both.
 

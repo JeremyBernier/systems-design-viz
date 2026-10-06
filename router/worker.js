@@ -11,6 +11,7 @@ const PROJECTS = {
   '/systems-design-viz': 'systems-design-viz.pages.dev',
   '/night-in-japan': 'night-in-japan.pages.dev',
   '/raccoon-city': 'raccoon-city.pages.dev',
+  '/music-viz': 'music-viz.pages.dev',
 };
 
 export default {

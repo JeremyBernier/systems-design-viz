@@ -22,4 +22,8 @@ routes = [
   { pattern = "jbernier.com/raccoon-city/*", zone_name = "jbernier.com" },
   { pattern = "www.jbernier.com/raccoon-city", zone_name = "jbernier.com" },
   { pattern = "www.jbernier.com/raccoon-city/*", zone_name = "jbernier.com" },
+  { pattern = "jbernier.com/music-viz", zone_name = "jbernier.com" },
+  { pattern = "jbernier.com/music-viz/*", zone_name = "jbernier.com" },
+  { pattern = "www.jbernier.com/music-viz", zone_name = "jbernier.com" },
+  { pattern = "www.jbernier.com/music-viz/*", zone_name = "jbernier.com" },
 ]

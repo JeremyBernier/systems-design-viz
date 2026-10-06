@@ -9,6 +9,8 @@
 // wrangler.toml.
 const PROJECTS = {
   '/systems-design-viz': 'systems-design-viz.pages.dev',
+  '/night-in-japan': 'night-in-japan.pages.dev',
+  '/raccoon-city': 'raccoon-city.pages.dev',
 };
 
 export default {

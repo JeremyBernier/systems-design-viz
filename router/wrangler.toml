@@ -14,4 +14,12 @@ routes = [
   { pattern = "jbernier.com/systems-design-viz/*", zone_name = "jbernier.com" },
   { pattern = "www.jbernier.com/systems-design-viz", zone_name = "jbernier.com" },
   { pattern = "www.jbernier.com/systems-design-viz/*", zone_name = "jbernier.com" },
+  { pattern = "jbernier.com/night-in-japan", zone_name = "jbernier.com" },
+  { pattern = "jbernier.com/night-in-japan/*", zone_name = "jbernier.com" },
+  { pattern = "www.jbernier.com/night-in-japan", zone_name = "jbernier.com" },
+  { pattern = "www.jbernier.com/night-in-japan/*", zone_name = "jbernier.com" },
+  { pattern = "jbernier.com/raccoon-city", zone_name = "jbernier.com" },
+  { pattern = "jbernier.com/raccoon-city/*", zone_name = "jbernier.com" },
+  { pattern = "www.jbernier.com/raccoon-city", zone_name = "jbernier.com" },
+  { pattern = "www.jbernier.com/raccoon-city/*", zone_name = "jbernier.com" },
 ]

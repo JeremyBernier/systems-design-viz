@@ -612,7 +612,7 @@ export class UI {
     const info = NODE_INFO[node.type];
     el.innerHTML = `
       <div class="btns d-nav"><button id="d-back" title="Deselect (Esc)">✕ Close</button><button id="d-zoom" class="primary">${this.zoomed ? '← Zoom out' : '🔍 Zoom in'}</button></div>
-      ${this.zoomed ? '' : `<p class="hint">Zoom in to look inside ${node.label}${APP_VIEW[node.type] ? ': how it works internally, and its hardware' : ': its CPU, memory, storage and network'}. Double-clicking it in the diagram does the same.</p>`}
+      ${this.zoomed ? '' : `<p class="hint">Zoom in to look inside ${node.label}${APP_VIEW[node.type] ? ': how it works internally, and its hardware' : ': its CPU, memory, storage and network'}. The magnifying glass beside it in the diagram does the same, as does double-clicking it.</p>`}
       <div class="d-head" style="margin-top:10px">
         <div class="d-title">${node.tech ? logoSVG(node.tech.logo, 34) : ''}<div><h3>${node.label}</h3><div class="d-kind">${node.tech && node.tech.name !== node.label ? node.tech.name + ' · ' : ''}${node.kind || info.kind}</div></div></div>
         <span class="badge" id="d-badge"></span>

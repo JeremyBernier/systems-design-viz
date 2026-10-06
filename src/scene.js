@@ -118,6 +118,15 @@ export class Scene {
 
     this.labelLayer = document.createElement('div');
     this.labelLayer.className = 'labels';
+    // magnifying glass that sits beside the selected component's card: one click zooms inside
+    this.zoomBtn = document.createElement('button');
+    this.zoomBtn.className = 'zoom-btn';
+    this.zoomBtn.title = 'Zoom in';
+    this.zoomBtn.setAttribute('aria-label', 'Zoom in to the selected component');
+    this.zoomBtn.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21M10.5 7.5v6M7.5 10.5h6"/></svg>';
+    this.zoomBtn.hidden = true;
+    this.zoomBtn.addEventListener('click', () => this.selectedId && this.onZoom(this.selectedId));
+    this.labelLayer.appendChild(this.zoomBtn);
     container.appendChild(this.labelLayer);
 
     this._buildNodes();
@@ -1330,6 +1339,16 @@ export class Scene {
         continue;
       }
       this._project(v, v.el, tmpV.copy(v.group.position).setY(HEIGHT[v.type] + 0.35));
+    }
+    // the zoom button rides at the right edge of the selected component's card
+    const zv = !this.focusId && this.selectedId && !this.placing && !this.connecting ? this.nodes[this.selectedId] : null;
+    const zShow = !!zv && !zv.el.hidden && zv.el.style.display !== 'none';
+    this.zoomBtn.hidden = !zShow;
+    if (zShow) {
+      tmpV.copy(zv.group.position).setY(HEIGHT[zv.type] + 0.35).project(this.camera);
+      const x = (tmpV.x * 0.5 + 0.5) * this.container.clientWidth + zv.el.offsetWidth / 2 + 6;
+      const y = (-tmpV.y * 0.5 + 0.5) * this.container.clientHeight - zv.el.offsetHeight / 2;
+      this.zoomBtn.style.transform = `translate(0,-50%) translate(${x.toFixed(1)}px,${y.toFixed(1)}px)`;
     }
     for (const key in this.rigLabels) {
       const el = this.rigLabels[key];

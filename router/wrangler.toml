@@ -1,0 +1,17 @@
+# The Worker that serves side projects under jbernier.com/<project>/ (worker.js).
+# Deploy with: npm run deploy:router
+name = "jbernier-project-router"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+workers_dev = false
+
+# One route per project prefix: the bare path, and everything under it. Nothing else on the
+# domain passes through this Worker.
+# Both hostnames are routed: the main site answers on www and redirects the bare domain to it,
+# so a project must be reachable on either.
+routes = [
+  { pattern = "jbernier.com/systems-design-viz", zone_name = "jbernier.com" },
+  { pattern = "jbernier.com/systems-design-viz/*", zone_name = "jbernier.com" },
+  { pattern = "www.jbernier.com/systems-design-viz", zone_name = "jbernier.com" },
+  { pattern = "www.jbernier.com/systems-design-viz/*", zone_name = "jbernier.com" },
+]

@@ -1,0 +1,4 @@
+# The site lives under /systems-design-viz/ (see vite.config.js). Old links to the Pages root keep working.
+/ /systems-design-viz/ 302
+/quiz /systems-design-viz/quiz 302
+/quiz.html /systems-design-viz/quiz 302

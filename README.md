@@ -1,10 +1,10 @@
 # System Design Simulator
 
-**Live demo: [systems-design-viz.pages.dev](https://systems-design-viz.pages.dev/)**
+**Live demo: [jbernier.com/systems-design-viz](https://jbernier.com/systems-design-viz/)**
 
 Made by Jeremy Bernier: [X](https://x.com/jeremybernier) · [jbernier.com](https://jbernier.com) · [LinkedIn](https://www.linkedin.com/in/jeremysbernier/)
 
-[![System Design Simulator running the YouTube preset](docs/screenshot.png)](https://systems-design-viz.pages.dev/)
+[![System Design Simulator running the YouTube preset](docs/screenshot.png)](https://jbernier.com/systems-design-viz/)
 
 > **This is a concept, not a reference.** It was vibe coded with [Claude](https://claude.com/claude-code), and it is by no means accurate: the capacities, latencies, prices and failure behaviour are rough approximations that have not been checked against real systems. Treat it as a toy for building intuition, and don't size or cost a real system from it.
 
@@ -14,6 +14,8 @@ Interactive 3D visualization of a small web service under load: clients → load
 npm install
 npm run dev
 ```
+
+`npm run deploy` builds and uploads the site to Cloudflare Pages. It is built to live under `/systems-design-viz/` (`vite.config.js`), and a small Worker on jbernier.com (`router/`, deployed with `npm run deploy:router`) forwards that path to the Pages site, so the public address is jbernier.com/systems-design-viz/.
 
 - Drag the traffic slider (20 → 20,000 req/s, log scale) and watch bottlenecks appear, backlogs grow and nodes explode.
 - Click any component to select it: it is highlighted and its live metrics open in the side panel. Press **Zoom in** there (or double-click the component) to look inside — the queue, database and functions have an internals view, and every component has a hardware view of CPU, memory, storage and network. `Esc` zooms out, then deselects.

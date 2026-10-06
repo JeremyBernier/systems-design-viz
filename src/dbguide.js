@@ -1,4 +1,8 @@
+import './dbguide.css';
 import { TECH, logoSVG } from './tech.js';
+import { ENGINE_WHY } from './tradeoffs.js';
+import { AT_A_GLANCE, GLANCE_COLUMNS, MECHANICS } from './dbconcepts.js';
+import { stageBar } from './buildui.js';
 import { fmtUSD } from './cost.js';
 import { fmtDur } from './sim.js';
 
@@ -217,6 +221,7 @@ const SCENARIOS = [
 
 const TABS = [
   ['engines', 'Engines side by side'],
+  ['mechanics', 'How databases work'],
   ['concepts', 'Concepts'],
   ['pick', 'Which would you pick?'],
 ];
@@ -242,6 +247,26 @@ export function initDbGuide(ui, sim) {
     }
   };
 
+  // a paragraph of short sentences reads better here as a list
+  const bullets = (text) => `<ul>${text.split(/(?<=[.!?])\s+(?=[A-Z("])/).map((s) => `<li>${s.replace(/\.$/, '')}</li>`).join('')}</ul>`;
+  // every engine on one screen, by the few properties that decide most choices
+  const glance = () => {
+    const row = (t, k) => {
+      const e = TECH[t][k];
+      return `<tr${e === sim.techOf(t) ? ' class="on"' : ''}><th><div class="dg-eng">${logoSVG(e.logo, 18)}<span>${e.name}</span></div></th><td>${t === 'db' ? 'OLTP' : 'OLAP'}</td>${AT_A_GLANCE[k].map((c) => `<td>${c}</td>`).join('')}</tr>`;
+    };
+    const rows = FAMILIES.flatMap((f) => f.engines.filter((k) => AT_A_GLANCE[k]).map((k) => row(f.type, k)));
+    return `<section class="dg-fam"><h2>At a glance</h2><p class="d-about">The same six questions asked of every engine. Read across a row for one engine's trade, or down a column to see who makes a different one.</p>
+      <div class="dg-scroll"><table class="dg-table dg-glance"><thead><tr><th>Engine</th><th>Built for</th>${GLANCE_COLUMNS.map((c) => `<th>${c}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div></section>`;
+  };
+  const mechanic = (m) => `<section class="dg-concept" id="dg-${m.id}">
+      <h2>${m.title}</h2><p class="dg-one">${m.one}</p>
+      ${m.what.map((p) => `<p class="d-about">${p}</p>`).join('')}
+      <div class="dg-pc"><div class="dg-pro"><b>Pros</b><ul>${m.pros.map((s) => `<li>${s}</li>`).join('')}</ul></div><div class="dg-con"><b>Cons</b><ul>${m.cons.map((s) => `<li>${s}</li>`).join('')}</ul></div></div>
+      <p class="d-about"><b>How the engines differ.</b> ${m.engines}</p>
+      <p class="dg-try"><b>In the simulator:</b> ${m.tryIt}</p>
+    </section>`;
+
   const family = (f) => {
     const current = sim.techOf(f.type);
     return `<section class="dg-fam">
@@ -249,7 +274,7 @@ export function initDbGuide(ui, sim) {
       <p class="d-about">${f.trade}</p>
       <p class="dg-pick"><b>Pick it when:</b> ${f.pick}</p>
       <div class="dg-scroll"><table class="dg-table">
-        <thead><tr><th>Engine</th><th>Good at</th><th>What you give up</th><th>In this simulator</th></tr></thead>
+        <thead><tr><th>Engine</th><th>What sets it apart</th><th>Pros</th><th>Cons</th><th>In this simulator</th></tr></thead>
         <tbody>${f.engines
           .map((k) => {
             const e = TECH[f.type][k];
@@ -258,8 +283,9 @@ export function initDbGuide(ui, sim) {
               <th><div class="dg-eng">${logoSVG(e.logo, 22)}<span>${e.name}<small>${e.vendor}</small></span></div>${
                 on ? '<em>In use</em>' : `<button data-use="${f.type}:${k}" title="Switch the simulation to ${e.name}">Use</button>`
               }</th>
-              <td>${ENGINES[k].strong}</td>
-              <td>${ENGINES[k].giveUp}</td>
+              <td class="dg-why">${ENGINE_WHY[k] || ''}</td>
+              <td class="dg-pro">${bullets(ENGINES[k].strong)}</td>
+              <td class="dg-con">${bullets(ENGINES[k].giveUp)}</td>
               <td><ul>${simFacts(f.type, e).map((s) => `<li>${s}</li>`).join('')}<li>${monthly(f.type, e)} per month</li></ul></td>
             </tr>`;
           })
@@ -269,7 +295,10 @@ export function initDbGuide(ui, sim) {
   };
 
   const views = {
+    mechanics: () =>
+      `<nav class="dg-nav" aria-label="Topics">${MECHANICS.map((m) => `<button data-jump="dg-${m.id}">${m.title}</button>`).join('')}</nav>` + MECHANICS.map(mechanic).join(''),
     engines: () =>
+      glance() +
       // the families of the component the guide was opened from come first
       [...FAMILIES].sort((a, b) => (b.type === type) - (a.type === type)).map(family).join('') +
       `<p class="hint">"In this simulator" shows the model's assumptions for the machine size in the catalog (<code>src/tech.js</code>): round figures chosen to keep the engines in a realistic order, not benchmarks. Cost is the on-demand list price at the current size and load.</p>`,
@@ -294,6 +323,8 @@ export function initDbGuide(ui, sim) {
 
   dlg.addEventListener('click', (e) => {
     if (e.target === dlg) return dlg.close(); // click on the backdrop
+    const jump = e.target.closest('[data-jump]');
+    if (jump) return document.getElementById(jump.dataset.jump).scrollIntoView({ block: 'start' });
     const t = e.target.closest('[data-tab]');
     if (t) {
       tab = t.dataset.tab;
@@ -311,6 +342,19 @@ export function initDbGuide(ui, sim) {
   });
   // Esc closes the dialog natively; keep it from also reaching the app's own Esc handler
   dlg.addEventListener('keydown', (e) => e.key === 'Escape' && e.stopPropagation());
+
+  // a way in that is always on screen: a button beside Build
+  const open = document.createElement('button');
+  open.id = 'dbguide-open';
+  open.textContent = '📚 Databases';
+  open.title = 'How databases differ, and how they work';
+  stageBar().append(open);
+  open.addEventListener('click', () => {
+    type = 'db';
+    render();
+    dlg.showModal();
+    $('dg-body').scrollTop = 0;
+  });
 
   // the button is part of the detail panel, which ui.js rebuilds on every selection
   $('detail').addEventListener('click', (e) => {

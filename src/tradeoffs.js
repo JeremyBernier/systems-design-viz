@@ -119,6 +119,132 @@ export const TRADE = {
   },
 };
 
+// One line per database engine on what sets it apart from the others.
+export const ENGINE_WHY = {
+  postgres: 'The default choice: the richest SQL, and free. One primary takes every write, and you run it.',
+  mysql: 'Like PostgreSQL with cheaper connections and simpler replication, and fewer advanced SQL features.',
+  rds: 'PostgreSQL with backups, patching and failover done for you, at about twice the price.',
+  aurora: 'Replicas share one storage layer, so they barely lag and failover is fast. The priciest relational option.',
+  cloudsql: 'Google\'s managed PostgreSQL: the same trade as RDS, on Google Cloud.',
+  spanner: 'Scales writes across machines and keeps SQL and transactions. Slower commits and a high entry price.',
+  cassandra: 'Writes cost no more than reads and there is no primary to lose. No joins, and heavy to operate.',
+  bigtable: 'Managed and built for huge write volumes. One index (the row key) and no cross-row transactions.',
+  dynamodb: 'Nothing to run, and it throttles instead of crashing. Reached by key only; you pay for provisioned throughput.',
+  clickhouse: 'The fastest on fresh data, and cheap on one machine. You run it, and large joins are weak.',
+  redshift: 'A classic SQL warehouse with full joins. A cluster you size and pay for around the clock.',
+  snowflake: 'Compute is separate from storage, so queries never slow loading. Data is about 45 s behind and credits add up.',
+  bigquery: 'Nothing to size, and it scans huge tables. About a second minimum per query, billed by data scanned.',
+};
+
+// The same one-liner for every other technology in the catalog, by component type.
+export const TECH_WHY = {
+  lb: {
+    nginx: 'The common default: cheap and fast, but one machine that you run and can lose.',
+    haproxy: 'Built purely for load balancing: the most throughput and the best health checks, with the same one-machine risk.',
+    envoy: 'Reconfigures without restarts and reports rich metrics. More overhead, and more to learn.',
+    alb: 'Managed and spread across zones, so there is nothing to run or lose. Billed per GB.',
+    gclb: 'One global address answered from the nearest Google edge. Billed per GB.',
+  },
+  web: {
+    ec2: 'A rented VM: the cheapest at steady load and the slowest to scale, at minutes per machine.',
+    gce: 'Google\'s VMs: the same trade as EC2.',
+    fargate: 'Containers with no hosts to patch. Scales in under a minute and costs more than the same VM.',
+    gke: 'Kubernetes: dense packing and fast rollouts, at the price of running Kubernetes.',
+    lambda: 'No servers and instant scale. Dearer at steady traffic, with cold starts.',
+    cloudrun: 'Any container, scaled per request down to zero. Dearer at steady traffic.',
+    metal: 'Your own hardware: the cheapest per request at scale, and the slowest of all to add.',
+  },
+  cache: {
+    redis: 'Rich data structures and optional persistence. Failover is yours to handle.',
+    memcached: 'Plain keys, multi-threaded, the simplest there is. Loses everything on restart.',
+    elasticache: 'Managed Redis with automatic failover, at about twice the price.',
+    memorystore: 'Google\'s managed Redis with failover. Dearer per GB than a VM.',
+  },
+  queue: {
+    rabbitmq: 'Routing and priorities on your own machine. Depth is limited by its memory.',
+    redisq: 'Jobs kept in the Redis you already have: the simplest start, and the weakest durability.',
+    sqs: 'Managed and effectively bottomless, with delays and dead-letter queues. Billed per request.',
+    pubsub: 'Managed and bottomless, and fans one message out to many subscribers. Billed by volume.',
+  },
+  worker: {
+    ec2: 'VMs pulling jobs: the cheapest for a steady stream, and slow to grow for a burst.',
+    gce: 'Google\'s VMs: the same trade as EC2.',
+    lambda: 'A function per job that follows the backlog within seconds. Dearer per job.',
+    cloudrun: 'Containers that scale with the backlog, down to zero. Dearer per job.',
+  },
+  kafka: {
+    kafka: 'The replayable log itself: the most throughput per dollar, and the hardest to operate.',
+    msk: 'Real Kafka with the brokers managed for you. You still size partitions.',
+    kinesis: 'No brokers and pay-for-use. Small per-shard limits and an AWS-only API.',
+    pubsub: 'Nothing to size at all. Weaker ordering and replay than a true log.',
+  },
+  consumer: {
+    flink: 'The lowest latency, with exactly-once results. Fills the lake with small files.',
+    spark: 'Larger batches and fewer files. Data arrives seconds to minutes late.',
+    firehose: 'Managed delivery that writes well-sized files. A minute of buffering and very little logic.',
+    dataflow: 'Managed, autoscaling stream processing. Costs more than your own cluster.',
+  },
+  lake: {
+    s3iceberg: 'The open table format most engines can read, stored on S3.',
+    gcsiceberg: 'The same Iceberg tables, stored on Google Cloud Storage.',
+    s3delta: 'The table format from Databricks: at its best with Spark, supported by fewer engines elsewhere.',
+  },
+  trino: {
+    trino: 'Fast interactive SQL over the lake, on a cluster you run.',
+    athena: 'The same engine with no cluster: you pay per TB scanned.',
+    spark: 'Handles the largest joins and survives a lost machine. Too slow to start for dashboards.',
+  },
+  bi: {
+    grafana: 'The best for time series and alerting. Free and self-hosted.',
+    superset: 'SQL-first open-source dashboards. Free, and rougher to use.',
+    metabase: 'The easiest for people who do not write SQL. Free and self-hosted.',
+    tableau: 'The most powerful visual analysis, with a licence for every user.',
+    quicksight: 'Serverless and cheap per reader, with fewer features.',
+    looker: 'Free and instant. Every view runs warehouse queries that you pay for.',
+  },
+  cdn: {
+    cloudfront: 'Fetching from S3 costs nothing. Dearer per GB than rivals at scale.',
+    cloudcdn: 'Rides on Google\'s global load balancer. Charges for every cache fill.',
+    cloudflare: 'A flat price with attack protection included. Large-scale pricing is by contract.',
+    fastly: 'Instant purges and a programmable edge, at the highest per-GB price.',
+  },
+  blob: {
+    s3: 'The default that every tool supports. A fee for every GB read out.',
+    gcs: 'Slightly cheaper per GB stored, with the same fee for reading out.',
+    r2: 'No fee for reading data out. Fewer features and storage classes.',
+  },
+  scheduler: {
+    watcher: 'Reads ahead into a delay queue, so jobs still fire through its own outage.',
+    cron: 'One machine and one loop: the simplest, and jobs are missed whenever it is down.',
+  },
+  connector: { kconnect: 'The standard framework for moving Kafka data into a warehouse.' },
+  fn: {
+    lambda: '1,000 concurrent executions by default, triggered by most AWS services.',
+    cloudfunctions: 'Google\'s equivalent, running on Cloud Run. 100 instances by default.',
+  },
+};
+TECH_WHY.db = TECH_WHY.clickhouse = ENGINE_WHY;
+
+// The same question one level up: what having this kind of component at all buys and costs,
+// whichever technology it is. Shown when choosing what to add.
+export const KIND = {
+  lb: { pros: ['Spreads traffic and stops sending it to dead servers', 'Servers can be added or replaced without clients noticing'], cons: ['One more hop on every request', 'Itself a single point of failure unless you run two'] },
+  cdn: { pros: ['Takes most of the bytes off your own servers', 'Faster for users far from your data centre'], cons: ['Billed for every GB it delivers', 'Users can see stale content until a cached copy expires'] },
+  web: { pros: ['More request capacity', 'Losing one no longer takes the site down'], cons: ['Each one opens more connections to the database', 'Costs money whether busy or idle'] },
+  worker: { pros: ['Slow work happens off the request path', 'Scales separately from the web tier'], cons: ['The result arrives later, not in the response', 'Failed and repeated jobs need handling'] },
+  fn: { pros: ['Nothing to run or patch', 'Costs nothing while idle'], cons: ['Cold starts add delay', 'A concurrency limit instead of a server count', 'Dearer than a machine at a steady volume'] },
+  scheduler: { pros: ['Work happens at a time, with no request to trigger it', 'Recurring jobs live in one place'], cons: ['One more service that must stay up', 'Jobs run late whenever it or the workers fall behind'] },
+  cache: { pros: ['Far fewer reads reach the database', 'Faster responses'], cons: ['Data can be out of date', 'After a restart it is empty and the database takes the full load'] },
+  blob: { pros: ['Cheap storage with no size limit', 'Keeps large files out of the database'], cons: ['Slower per request than a database', 'A fee for every GB read out to the internet'] },
+  lake: { pros: ['The cheapest way to keep all history', 'Open file formats that many engines can read'], cons: ['Queries take seconds, not milliseconds', 'Files need regular compaction'] },
+  queue: { pros: ['Absorbs bursts so requests return quickly', 'Producers and workers fail and scale separately'], cons: ['Hides overload instead of fixing it', 'Work becomes asynchronous: duplicates and ordering are yours to handle'] },
+  kafka: { pros: ['Many consumers read the same events independently', 'History can be replayed'], cons: ['Demanding to operate', 'A consumer can fall behind without anything failing'] },
+  consumer: { pros: ['Moves events into cheap analytical storage', 'Reshapes and validates them on the way'], cons: ['One more pipeline stage to watch', 'Data reaches the lake late'] },
+  connector: { pros: ['Lets a warehouse that cannot read Kafka receive its events'], cons: ['One more cluster to run and watch', 'Adds a batching delay'] },
+  trino: { pros: ['SQL over the lake with nothing to load first', 'Joins data from different sources'], cons: ['Seconds per query', 'A cluster to run, or a fee per scan'] },
+  bi: { pros: ['Answers for people who do not write SQL', 'One shared view of the numbers'], cons: ['Heavy dashboards load the databases behind them', 'Only as fresh as the data it reads'] },
+};
+
 // The load each kind of component is sized against, and what one unit of a technology can take.
 // now(sim, node) is the whole tier's load (default: the node's arrival rate); own(node) is the
 // share of it this one node carries, where a tier is several nodes (web servers).

@@ -1,15 +1,21 @@
 /* ---------- Build: the button under the header, the component picker, the placing hint ---------- */
-#build-open {
+#stagebar {
   position: fixed;
   top: 96px;
   left: 344px; /* set from the sidebar's edge in buildui.js */
   z-index: 5;
+  display: flex;
+  gap: 8px;
+}
+#stagebar button {
   padding: 7px 16px;
   font-weight: 600;
-  border-color: var(--accent);
   background: rgb(26 26 25 / 0.92);
   box-shadow: 0 2px 12px rgb(0 0 0 / 0.45);
   white-space: nowrap;
+}
+#build-open {
+  border-color: var(--accent);
 }
 #build-open kbd,
 #build-open-side kbd {
@@ -123,7 +129,7 @@
   color: var(--text-2);
 }
 @media (max-width: 1100px) {
-  #build-open {
+  #stagebar {
     top: 92px;
   }
 }
@@ -183,4 +189,84 @@
 }
 #confirm button.danger {
   background: rgb(208 59 59 / 0.25);
+}
+
+/* pros and cons on a card */
+.bd-pc {
+  grid-column: 1 / -1;
+  display: block;
+  margin-top: 7px;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.bd-pc i {
+  display: block;
+  margin-bottom: 1px;
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.bd-pc span {
+  display: block;
+  position: relative;
+  padding-left: 14px;
+  line-height: 1.4;
+}
+.bd-pc span::before {
+  position: absolute;
+  left: 1px;
+  font-weight: 700;
+}
+.bd-pc.pro span::before {
+  content: '+';
+  color: var(--good);
+}
+.bd-pc.con span::before {
+  content: '−';
+  color: var(--serious);
+}
+
+/* sections of the picker: jump links, what the kind is for, and its own pros and cons folded away */
+.bd-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.bd-nav button {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.bd-body h2 {
+  scroll-margin-top: 8px;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+  color: var(--text);
+}
+.bd-what {
+  margin: 0 0 8px;
+  max-width: 80ch;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.bd-kind {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.bd-kind summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.bd-kind > div {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 320px));
+  gap: 4px 24px;
+  margin-top: 4px;
+}
+.bd-kind .bd-pc {
+  margin-top: 4px;
 }

@@ -1,19 +1,61 @@
 import './build.css';
-import { NODE_INFO } from './sim.js';
 import { TECH, logoSVG } from './tech.js';
+import { TRADE, KIND, TECH_WHY } from './tradeoffs.js';
 
 // Adding a component: press Build (or B), pick one from the dialog, and it rides on the pointer as
 // a see-through preview until you click to build it there. Esc cancels at either step.
 
 const $ = (id) => document.getElementById(id);
-// How the picker groups components. Anything not listed lands under "Other".
+
+// The row of buttons at the top left of the diagram, just right of the sidebar. Created on first use.
+export function stageBar() {
+  let bar = $('stagebar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'stagebar';
+    document.body.append(bar);
+  }
+  return bar;
+}
+// The picker's sections, in the order a request meets them. Each lists the specific technologies of
+// one kind of component: [component type, section name]. Databases have their own grouping below.
 const SECTIONS = [
-  ['Traffic and delivery', ['lb', 'cdn']],
-  ['Compute', ['web', 'worker', 'fn', 'scheduler']],
-  ['Cache and storage', ['cache', 'blob', 'lake']],
-  ['Messaging and streaming', ['queue', 'kafka', 'consumer', 'connector']],
-  ['Analytics', ['trino', 'bi']],
+  ['lb', 'Load balancers'],
+  ['cdn', 'Content delivery networks'],
+  ['web', 'Application servers'],
+  ['worker', 'Background workers'],
+  ['fn', 'Serverless functions'],
+  ['scheduler', 'Job schedulers'],
+  ['db', 'Databases'],
+  ['cache', 'Caches'],
+  ['blob', 'Object storage'],
+  ['lake', 'Data lake table formats'],
+  ['queue', 'Message queues'],
+  ['kafka', 'Event streams'],
+  ['consumer', 'Stream processors'],
+  ['connector', 'Warehouse connectors'],
+  ['trino', 'Lake query engines'],
+  ['bi', 'Dashboards'],
 ];
+// One line per section on what this kind of component is for, and its catch.
+const WHY = {
+  lb: 'Spreads requests over your servers. One is a single point of failure; a second covers for it.',
+  cdn: 'Serves images and video from the edge so those bytes never reach your servers.',
+  web: 'Run your application code. More of them raise request capacity, until the database becomes the limit.',
+  worker: 'Do slow work off the request path. More of them drain the job queue faster; idle ones still cost money.',
+  fn: 'Code run per event with nothing to manage, trading servers for cold starts and a concurrency limit.',
+  scheduler: 'Start jobs at a set time instead of in response to a request.',
+  db: 'Where the data lives. Every engine buys something by giving something else up.',
+  cache: 'Answer repeat reads from memory to spare the database. They come back cold after a restart.',
+  blob: 'Cheap, unlimited storage for files. Slow per request, and billed for every GB read out.',
+  lake: 'How files in object storage are organised into tables that query engines can read.',
+  queue: 'Hold background jobs so requests return quickly. A queue hides overload; it does not fix it.',
+  kafka: 'A replayable log of events that many consumers read independently. Heavier to run than a queue.',
+  consumer: 'Turn the event stream into files in the lake. Fresher data means more, smaller files.',
+  connector: 'Load Kafka into a warehouse that cannot read it itself.',
+  trino: 'SQL straight over the lake\'s files, with nothing to load first. Seconds per query.',
+  bi: 'Charts for people. Only as fresh and as fast as the database behind them.',
+};
 // Every database you can add, by the trade each family makes. [component type, heading, engines]
 const DATABASES = [
   ['db', 'OLTP · relational', 'Tables, joins and transactions; one primary takes every write', ['postgres', 'mysql', 'rds', 'aurora', 'cloudsql']],
@@ -21,52 +63,21 @@ const DATABASES = [
   ['db', 'OLTP · wide-column and key-value', 'Scale out by key; no joins', ['cassandra', 'bigtable', 'dynamodb']],
   ['clickhouse', 'OLAP · analytics', 'Columnar: built to scan and aggregate, not to update rows', ['clickhouse', 'redshift', 'snowflake', 'bigquery']],
 ];
-// One line per card on what sets it apart: the trade it makes against the alternatives.
-const WHY = {
-  lb: 'One is a single point of failure; a second one covers for it.',
-  cdn: 'Serves images and video from the edge so those bytes never reach your servers. Billed per GB delivered.',
-  web: 'More of them raise request capacity, until the database becomes the limit instead.',
-  worker: 'More of them drain the job queue faster. Idle ones still cost money.',
-  fn: 'Code run per event with nothing to manage. Trades servers for cold starts and a concurrency limit.',
-  scheduler: 'Starts jobs at a set time. Reads ahead, so jobs still fire through a short outage of its own.',
-  cache: 'Spares the database by answering repeat reads from memory. Comes back cold after a restart.',
-  blob: 'Cheap, unlimited storage for files. Slow per request, and billed for every GB read out.',
-  lake: 'The cheapest place to keep all history, as files. Queries take seconds, not milliseconds.',
-  queue: 'Absorbs bursts so requests return quickly. It hides overload; it does not fix it.',
-  kafka: 'A replayable log that many consumers read independently. Heavier to run than a queue.',
-  consumer: 'Turns the event stream into files in the lake. Fresher data means more, smaller files.',
-  connector: 'Loads Kafka into a warehouse that cannot read it itself. One more thing to run and watch.',
-  trino: 'SQL straight over the lake\'s files, with nothing to load first. Seconds per query.',
-  bi: 'Dashboards for people. Only as fresh and as fast as the database behind them.',
-};
-const ENGINE_WHY = {
-  postgres: 'The default choice: the richest SQL, and free. One primary takes every write, and you run it.',
-  mysql: 'Like PostgreSQL with cheaper connections and simpler replication, and fewer advanced SQL features.',
-  rds: 'PostgreSQL with backups, patching and failover done for you, at about twice the price.',
-  aurora: 'Replicas share one storage layer, so they barely lag and failover is fast. The priciest relational option.',
-  cloudsql: 'Google\'s managed PostgreSQL: the same trade as RDS, on Google Cloud.',
-  spanner: 'Scales writes across machines and keeps SQL and transactions. Slower commits and a high entry price.',
-  cassandra: 'Writes cost no more than reads and there is no primary to lose. No joins, and heavy to operate.',
-  bigtable: 'Managed and built for huge write volumes. One index (the row key) and no cross-row transactions.',
-  dynamodb: 'Nothing to run, and it throttles instead of crashing. Reached by key only; you pay for provisioned throughput.',
-  clickhouse: 'The fastest on fresh data, and cheap on one machine. You run it, and large joins are weak.',
-  redshift: 'A classic SQL warehouse with full joins. A cluster you size and pay for around the clock.',
-  snowflake: 'Compute is separate from storage, so queries never slow loading. Data is about 45 s behind and credits add up.',
-  bigquery: 'Nothing to size, and it scans huge tables. About a second minimum per query, billed by data scanned.',
-};
-const first = (s) => s.split(/(?<=\.)\s/)[0]; // the first sentence of a description
+// Pros and cons under a card: a few of each, so the trade is visible before choosing.
+const list = (cls, name, items) => (items && items.length ? `<span class="bd-pc ${cls}"><i>${name}</i>${items.map((s) => `<span>${s}</span>`).join('')}</span>` : '');
+const proscons = (pros, cons) => list('pro', 'Pros', pros) + list('con', 'Cons', cons);
 
 export function initBuildUI(ui, sim) {
   const open = document.createElement('button');
   open.id = 'build-open';
-  document.body.append(open);
+  stageBar().prepend(open);
   const hint = document.createElement('div');
   hint.id = 'place-hint';
   hint.hidden = true;
   document.body.append(hint);
   const dlg = document.createElement('dialog');
   dlg.id = 'build-dlg';
-  dlg.innerHTML = `<form method="dialog" class="pl-head"><div><h3>Add a component</h3><p class="hint">Pick one, then click in the diagram where it should go. The first of a kind arrives with no connections: wire it up with “Connect components”. Another of a kind you already have joins the first and shares its load.</p></div><button aria-label="Close">✕</button></form><div class="bd-body" id="bd-body"></div>`;
+  dlg.innerHTML = `<form method="dialog" class="pl-head"><div><h3>Add a component</h3><p class="hint">Pick a technology, then click in the diagram where it should go. The first of a kind arrives with no connections: wire it up with “Connect components”. Another of a kind you already have joins the first and shares its load.</p></div><button aria-label="Close">✕</button></form><div class="bd-body" id="bd-body"></div>`;
   document.body.append(dlg);
 
   // The next unused node of a kind, how many are already in the diagram, and the most there can be.
@@ -74,32 +85,27 @@ export function initBuildUI(ui, sim) {
     const all = Object.values(sim.nodes).filter((n) => n.type === type);
     return { all, free: sim.placeable().find((n) => n.type === type), used: all.filter((n) => n.active).length, max: all.length };
   };
-  // Why a card cannot be picked; a card that can be picked says what sets it apart instead.
-  const blocked = (type, s) => (type === 'connector' && !s.used ? 'Not needed here: this warehouse reads Kafka by itself.' : `All ${s.max} are already in the diagram.`);
-  // one card per kind of component
-  const card = (type) => {
-    const s = slot(type);
-    const info = NODE_INFO[type];
-    const tech = s.all[0].tech;
-    return `<button class="bd-card" ${s.free ? `data-id="${s.free.id}"` : 'disabled'}>${tech ? logoSVG(tech.logo, 30) : '<span></span>'}<b>${sim.roleName(type)}</b><small>${first(info.about)}</small><em>${s.free ? WHY[type] || '' : blocked(type, s)}</em></button>`;
-  };
-  // one card per database engine: the engine is chosen here, not after placing
-  const engine = (type, key) => {
+  // Why a card cannot be picked; a card that can be picked says what sets the technology apart instead.
+  const blocked = (type, s) => (type === 'connector' && !s.used ? 'Not needed here: this warehouse reads Kafka by itself.' : `All ${s.max} of this kind are already in the diagram.`);
+  // one card per specific technology: what you pick is what gets built
+  const card = (type, key) => {
     const s = slot(type);
     const t = TECH[type][key];
-    return `<button class="bd-card" ${s.free ? `data-id="${s.free.id}" data-tech="${key}"` : 'disabled'}>${logoSVG(t.logo, 30)}<b>${t.name}</b><small>${t.vendor} · ${t.kind.replace(/^OL[TA]P · /, '')}</small><em>${s.free ? ENGINE_WHY[key] || '' : `All ${s.max} databases of this kind are already in the diagram.`}</em></button>`;
+    const trade = (TRADE[type] || {})[key];
+    // application servers all run one technology here, so choosing another one moves the whole tier
+    const moves = type === 'web' && s.used && sim.techOf('web') !== t ? ` Adding it switches every application server to ${t.name}.` : '';
+    return `<button class="bd-card" ${s.free ? `data-id="${s.free.id}" data-tech="${key}"` : 'disabled'}>${logoSVG(t.logo, 30)}<b>${t.name}</b><small>${t.vendor} · ${t.kind.replace(/^OL[TA]P · /, '')}</small><em>${
+      s.free ? ((TECH_WHY[type] || {})[key] || '') + moves : blocked(type, s)
+    }</em>${trade ? proscons(trade.gain.slice(0, 3), trade.lose.slice(0, 3)) : ''}</button>`;
   };
   const render = () => {
-    const types = [...new Set(Object.values(sim.nodes).map((n) => n.type))].filter((t) => t !== 'client');
-    const grid = (cards) => `<div class="bd-grid">${cards.join('')}</div>`;
-    const listed = new Set([...SECTIONS.flatMap(([, list]) => list), 'db', 'clickhouse']);
-    const sections = [...SECTIONS, ['Other', types.filter((t) => !listed.has(t))]].map(([title, list]) => {
-      const here = list.filter((t) => types.includes(t));
-      return here.length ? `<h2>${title}</h2>${grid(here.map(card))}` : '';
-    });
-    const databases = `<h2>Database</h2>` + DATABASES.map(([type, name, what, keys]) => `<h4>${name} <span>${what}</span></h4>${grid(keys.filter((k) => TECH[type][k]).map((k) => engine(type, k)))}`).join('');
-    sections.splice(2, 0, databases); // after Traffic and Compute
-    $('bd-body').innerHTML = sections.join('');
+    const grid = (type, keys) => `<div class="bd-grid">${keys.filter((k) => TECH[type][k]).map((k) => card(type, k)).join('')}</div>`;
+    // what having this kind of component at all buys and costs, folded away under the section heading
+    const kind = (type) => (KIND[type] ? `<details class="bd-kind"><summary>Why have one at all?</summary><div>${proscons(KIND[type].pros, KIND[type].cons)}</div></details>` : '');
+    const section = ([type, name]) =>
+      `<h2 id="bd-${type}">${name}</h2><p class="bd-what">${WHY[type] || ''}</p>` +
+      (type === 'db' ? DATABASES.map(([t, fam, what, keys]) => `<h4>${fam} <span>${what}</span></h4>${grid(t, keys)}`).join('') : kind(type) + grid(type, Object.keys(TECH[type])));
+    $('bd-body').innerHTML = `<nav class="bd-nav" aria-label="Sections">${SECTIONS.map(([type, name]) => `<button data-jump="bd-${type}">${name}</button>`).join('')}</nav>` + SECTIONS.filter(([type]) => TECH[type]).map(section).join('');
   };
   const show = () => {
     if (dlg.open) return;
@@ -112,14 +118,14 @@ export function initBuildUI(ui, sim) {
   const sync = () => {
     const placing = ui.mode === 'place' && sim.nodes[ui.placingId];
     open.setAttribute('aria-pressed', !!placing);
-    open.innerHTML = placing ? `Placing ${NODE_INFO[placing.type].title} — click to build<kbd>Esc</kbd> cancels` : '＋ Build<kbd>B</kbd>';
+    open.innerHTML = placing ? `Placing ${placing.tech.name} — click to build<kbd>Esc</kbd> cancels` : '＋ Build<kbd>B</kbd>';
     hint.hidden = true; // reappears on the next pointer move over the diagram
-    if (placing) hint.innerHTML = `${NODE_INFO[placing.type].title} <span>· click to build · Esc to cancel</span>`;
+    if (placing) hint.innerHTML = `${placing.tech.name} <span>· click to build · Esc to cancel</span>`;
   };
   ui.onMode = sync;
   sync();
   // the button sits just right of the left sidebar, however wide that is
-  const dock = () => (open.style.left = $('controls').getBoundingClientRect().right + 12 + 'px');
+  const dock = () => (stageBar().style.left = $('controls').getBoundingClientRect().right + 12 + 'px');
   new ResizeObserver(dock).observe($('controls'));
   addEventListener('resize', dock);
   dock();
@@ -129,13 +135,14 @@ export function initBuildUI(ui, sim) {
   dlg.addEventListener('keydown', (e) => e.key === 'Escape' && e.stopPropagation()); // Esc closes the dialog only
   dlg.addEventListener('click', (e) => {
     if (e.target === dlg) return dlg.close(); // the backdrop
+    const jump = e.target.closest('[data-jump]');
+    if (jump) return document.getElementById(jump.dataset.jump).scrollIntoView({ block: 'start' });
     const b = e.target.closest('.bd-card[data-id]');
     if (!b) return;
     dlg.close();
     const node = sim.nodes[b.dataset.id];
-    // a database card names its engine; any other extra tier member starts as the same technology as the first
-    const tech = b.dataset.tech || (node.extraOf ? sim.params.tech[node.type] : null);
-    if (tech) sim.setTech(node.type, tech, true, node.id);
+    // the card names the technology: the first of a kind sets it for that kind, an extra one takes it alone
+    if (node.extraOf || sim.params.tech[node.type] !== b.dataset.tech) sim.setTech(node.type, b.dataset.tech, true, node.id);
     ui.setMode('place', node.id);
   });
   addEventListener('keydown', (e) => {

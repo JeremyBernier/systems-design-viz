@@ -1,0 +1,71 @@
+/* ---------- database guide: at-a-glance table, pros and cons, the "how databases work" tab ---------- */
+.dg-glance td,
+.dg-glance th {
+  white-space: normal;
+}
+.dg-glance tbody th {
+  white-space: nowrap;
+}
+.dg-table td.dg-why {
+  color: var(--text);
+  min-width: 190px;
+}
+.dg-pro ul,
+.dg-con ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.dg-pro li,
+.dg-con li {
+  position: relative;
+  padding-left: 14px;
+  margin: 3px 0;
+}
+.dg-pro li::before,
+.dg-con li::before {
+  position: absolute;
+  left: 0;
+  font-weight: 700;
+}
+.dg-pro li::before {
+  content: '+';
+  color: var(--good);
+}
+.dg-con li::before {
+  content: '−';
+  color: var(--serious);
+}
+.dg-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.dg-nav button {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+.dg-one {
+  margin: 0 0 8px;
+  font-size: 14px;
+  color: var(--text);
+}
+.dg-pc {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  max-width: 78ch;
+  margin: 10px 0;
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.4;
+}
+.dg-pc b {
+  display: block;
+  margin-bottom: 3px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}

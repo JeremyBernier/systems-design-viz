@@ -24,8 +24,8 @@ export function tradeHTML(node) {
   const t = key && (TRADE[node.type] || {})[key];
   if (!t) return '';
   const n = Object.keys(TRADE[node.type]).length;
-  return `<h2>Trade-offs of ${node.tech.name}</h2>
-    <div class="trade"><div class="gain"><b>You gain</b>${list(t.gain)}</div><div class="lose"><b>You give up</b>${list(t.lose)}</div></div>
+  return `<h2>Pros and cons of ${node.tech.name}</h2>
+    <div class="trade"><div class="gain"><b>Pros</b>${list(t.gain)}</div><div class="lose"><b>Cons</b>${list(t.lose)}</div></div>
     <p class="trade-ops">Effort to run: ${ops(t.ops)}</p>
     ${hasChoice(node.type) ? `<button id="d-compare" class="wide">⚖ Compare all ${n} options</button>` : ''}`;
 }
@@ -109,7 +109,7 @@ export function initCompareUI(ui, sim) {
       <section>
         <h2>Side by side at today's load · ${fmtLoad(c.now)} ${c.unit}</h2>
         <div class="cmp-scroll"><table class="cmp-table">
-          <thead><tr><th>Technology</th><th>Cost per month</th><th>One ${unitWord} handles</th><th>Growing it</th><th>When overloaded or broken</th><th>Effort to run</th><th>You gain</th><th>You give up</th></tr></thead>
+          <thead><tr><th>Technology</th><th>Cost per month</th><th>One ${unitWord} handles</th><th>Growing it</th><th>When overloaded or broken</th><th>Effort to run</th><th>Pros</th><th>Cons</th></tr></thead>
           <tbody>${c.rows
             .map(
               (r) => `<tr${r.current ? ' class="on"' : ''}>

@@ -164,7 +164,21 @@ p {
   flex: none;
 }
 .brand h1 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 16px;
+  white-space: nowrap;
+}
+/* link to the source, at the right end of the title row */
+.brand .gh {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-2);
+}
+.brand .gh:hover {
+  color: var(--text);
 }
 .brand p {
   color: var(--text-2);

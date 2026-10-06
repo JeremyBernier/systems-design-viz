@@ -30,6 +30,7 @@ HEIGHT.cdn = 1.3;
 HEIGHT.blob = 1.4;
 HEIGHT.fn = 1.1;
 HEIGHT.connector = 1.1;
+HEIGHT.scheduler = 1.5;
 // What each queue technology calls the same moving parts (used by the zoomed-in broker view).
 const QUEUE_TERMS = {
   rabbitmq: { entry: 'Exchange', queue: 'Queue', ready: 'ready', flight: 'Unacked', done: 'acks' },
@@ -71,7 +72,9 @@ const tmpS = new THREE.Vector3();
 const tmpC = new THREE.Color();
 
 export class Scene {
-  constructor(container, sim, { onSelect, onPlace, onConnect }) {
+  constructor(container, sim, { onSelect, onZoom, onPlace, onConnect }) {
+    this.onZoom = onZoom;
+    this.selectedId = null; // highlighted in the overview; zooming in (focusId) is a separate step
     this.onPlace = onPlace;
     this.onConnect = onConnect;
     this.placing = null; // id of the component being placed
@@ -122,6 +125,11 @@ export class Scene {
     for (const id in this.nodes) this.nodes[id].group.position.copy(this.nodes[id].target);
     this._buildLinks();
     this._buildParticles();
+    // selection marker: a bright ring around the chosen component
+    this.selRing = new THREE.Mesh(new THREE.TorusGeometry(2.2, 0.07, 8, 72), new THREE.MeshBasicMaterial({ color: FLOW.request, toneMapped: false, transparent: true }));
+    this.selRing.rotation.x = Math.PI / 2;
+    this.selRing.visible = false;
+    this.scene.add(this.selRing);
     this._buildRig();
     this.view = 'app'; // 'app' = application view where one exists, 'hw' = hardware rig
     this.appRigs = {};
@@ -169,6 +177,7 @@ export class Scene {
       blob: [-5.5, -13.5],
       fn: [10, -12.5],
       connector: [4, 17],
+      scheduler: [16, -1.5],
     };
     for (const id in this.sim.nodes) {
       const type = this.sim.nodes[id].type;
@@ -254,6 +263,16 @@ export class Scene {
         // a six-sided bucket of objects (the data lake's bucket is round)
         add(new THREE.CylinderGeometry(1.1, 0.8, 1.0, 6), shell(), 0, 0.6, 0);
         add(new THREE.CylinderGeometry(0.95, 0.95, 0.05, 6), glow(), 0, 1.12, 0);
+      } else if (type === 'scheduler') {
+        // a clock face lying flat, with a hand that sweeps as jobs fall due
+        add(new THREE.CylinderGeometry(1.0, 1.1, 0.7, 12), shell(), 0, 0.45, 0);
+        add(new THREE.CylinderGeometry(0.85, 0.85, 0.04, 32), glow(), 0, 0.83, 0);
+        v.spin = new THREE.Group();
+        v.spin.position.y = 0.9;
+        const hand = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.06, 0.1), shell());
+        hand.position.x = 0.36;
+        v.spin.add(hand);
+        body.add(v.spin);
       } else if (type === 'connector') {
         // a small adapter: two worker boxes bridged by a pipe
         add(new THREE.BoxGeometry(0.7, 0.6, 0.9), shell(), -0.55, 0.4, 0);
@@ -403,6 +422,8 @@ export class Scene {
     add('client', 'cdn', FLOW.asset);
     add('cdn', 'blob', FLOW.asset);
     add('blob', 'fn', FLOW.job);
+    add('scheduler', 'db', FLOW.read);
+    add('scheduler', 'queue', FLOW.job);
     add('kafka', 'connector', FLOW.event);
     add('connector', 'clickhouse', FLOW.event);
     add('queue', 'fn', FLOW.job);
@@ -1011,6 +1032,11 @@ export class Scene {
       }
       if (id) this.onSelect(id);
     });
+    // double-click is the shortcut for the panel's Zoom in button
+    dom.addEventListener('dblclick', (e) => {
+      const id = this.placing || this.connecting ? null : pick(e);
+      if (id) this.onZoom(id);
+    });
     dom.addEventListener('pointermove', (e) => {
       this.cursor = groundAt(e);
       if (down && down.id && !this.connecting && (down.dragging || moved(e, down))) {
@@ -1027,6 +1053,10 @@ export class Scene {
       this.hoverId = this.placing ? null : pick(e);
       dom.style.cursor = this.placing ? 'crosshair' : this.hoverId ? (this.connecting ? 'cell' : 'grab') : '';
     });
+  }
+
+  select(id) {
+    this.selectedId = id;
   }
 
   focus(id) {
@@ -1117,7 +1147,7 @@ export class Scene {
       // a crashed machine slumps and shakes with the hover highlight disabled
       v.body.scale.y += ((n.down ? 0.8 : 1) - v.body.scale.y) * 0.2;
       v.body.rotation.z += ((n.down ? 0.12 : 0) - v.body.rotation.z) * 0.2;
-      const s = this.hoverId === id && !focused ? 1.06 : 1;
+      const s = (this.hoverId === id || this.selectedId === id) && !focused ? 1.06 : 1;
       v.body.scale.x = v.body.scale.z = v.body.scale.x + (s - v.body.scale.x) * 0.25;
       // overloaded machines visibly strain
       v.body.position.x = !n.down && n.stress > 0.3 ? (Math.random() - 0.5) * 0.08 * n.stress : 0;
@@ -1261,6 +1291,12 @@ export class Scene {
     this.flash.intensity *= Math.exp(-dt * 7);
 
     // hardware rig for the focused node
+    const sel = !this.focusId && this.selectedId && this.nodes[this.selectedId];
+    this.selRing.visible = !!sel && sel.group.visible;
+    if (sel) {
+      this.selRing.position.copy(sel.group.position).setY(0.08);
+      this.selRing.material.opacity = 0.75 + 0.25 * Math.sin(sim.time * 5);
+    }
     const fnode = this.focusId && sim.nodes[this.focusId];
     const app = (fnode && this.view === 'app' && this.appRigs[fnode.type]) || null;
     this.rig.visible = !!fnode && !app;
@@ -1328,6 +1364,7 @@ export class Scene {
       else if (n.type === 'kafka') stat = `${fmtRate(n.inRate)} msg/s · lag ${fmtRate(Math.max(n.lag, n.lagCH))}`;
       else if (n.type === 'lake') stat = `${fmtGB(n.storedGB)} · ${n.files.toLocaleString()} files`;
       else if (n.type === 'cdn') stat = `${fmtRate(n.inRate)} obj/s · ${Math.round(n.hit * 100)}% edge hits`;
+      else if (n.type === 'scheduler') stat = n.missed > 1 ? `${Math.round(n.missed).toLocaleString()} jobs overdue` : `${fmtRate(n.outRate)} jobs/s due · ${n.aheadSecs.toFixed(0)}s queued ahead`;
       else if (n.type === 'connector') stat = `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} rows/s`;
       else if (n.type === 'fn') stat = `${fmtRate(n.outRate)} invocations/s · ${n.concurrency.toFixed(n.concurrency < 10 ? 1 : 0)} concurrent`;
       else if (n.type === 'blob') stat = `${fmtGB(n.storedGB)} · ${fmtRate(n.outRate)} GET/s`;
@@ -1360,6 +1397,7 @@ export class Scene {
       v.elData.textContent = n.down || (n.type === 'cache' && !n.active) ? '' : fmtBits(n.bps);
       v.el.dataset.level = level;
       v.el.classList.toggle('hover', this.hoverId === id);
+      v.el.classList.toggle('selected', this.selectedId === id);
       // while wiring, show which components the chosen one may connect to
       v.el.dataset.wire = !this.connecting ? '' : !this.connectFrom ? 'pick' : id === this.connectFrom ? 'from' : sim.canConnect(this.connectFrom, id) ? 'ok' : 'no';
       v.elBar.style.width = Math.min(100, n.util * 100) + '%';

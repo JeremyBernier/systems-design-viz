@@ -51,3 +51,9 @@ The user should be able to select from preset systems, like Youtube and Instagra
 ---
 
 When zooming in on a component (eg. AWS Athena), there should be a description telling me what the technology is
+
+---
+
+Let's make this more educational. The goal is so that users can learn systems design and understand things like tradeoffs and bottlenecks. We can for example add quizzes to challenge users.
+
+Help me come up with some ideas to make this more educational.

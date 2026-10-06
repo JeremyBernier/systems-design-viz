@@ -45,6 +45,7 @@ const NOTES = {
   'blob.net': 'CDN cache misses and uploads (or every asset read when there is no CDN)',
   'fn.cpu': 'Share of the concurrency limit in use',
   'connector.cpu': 'Decoding events and building batches',
+  'scheduler.cpu': 'Querying for due jobs and enqueuing them',
   'connector.mem': 'Rows buffered between flushes',
   'fn.net': 'Objects read from the bucket and results written back',
 };
@@ -64,6 +65,7 @@ const TIPS = [
   ['Starve ingestion', 'Push dashboard queries past ~100/s. ClickHouse spends its CPU on queries, inserts fall behind and dashboards go stale.'],
   ['Replicas are for reads', 'Remove the cache, set writes to 2% and run 6 web servers at 6,000 req/s: the database drowns in reads. Add 2 read replicas and it recovers. Now raise writes to 40%: every write still goes through the one primary, replicas stop helping and fall behind. Only shards raise the write ceiling — and 4 shards give about 3×, not 4×.'],
   ['Failover, and losing one node of many', 'Give the database a read replica and kill it: writes fail for about 30 s while the replica is promoted, but reads keep flowing. Compare with no replica. Then give the cache 3 nodes and kill it: one node dies and only a third of the keys go cold.'],
+  ['Kill the scheduler', 'Pick the Job Scheduler system and kill the Scheduler. For ten seconds nothing is late: those jobs were already handed to the queue as delayed messages. Then the overdue count climbs, and on restart the backlog lands on the workers at 3× the normal rate. Switch its technology to Cron on one VM and kill it again: jobs are missed at once, and it cannot keep up with the load at all.'],
   ['Functions on the queue', 'Click Connect components, then the job queue and the functions component. Lambda now polls the queue next to the worker machines: a backlog that took minutes to drain is gone in seconds, with no machines to add — and a per-invocation line appears on the bill. Zoom into it to watch environments cold-start, stay warm, then get reclaimed.'],
   ['Remove the CDN', 'Pick the Instagram or YouTube system, click the CDN and remove it. Every photo and video now squeezes through the web servers: their network cards saturate at 1 Gbps while the CPU sits idle, most asset requests fail, and "Data transfer out" takes the CDN\'s place on the bill.'],
   ['Cold edge', 'Kill the CDN and let it restart, or drag the CDN cache TTL down to a few seconds. Misses pour into object storage until the edge is warm again; switch the CDN to Cloudflare or Fastly and each of those bytes is also billed as origin egress.'],
@@ -162,7 +164,9 @@ class Chart {
 
 // ---------------------------------------------------------------- UI
 export class UI {
-  constructor(sim, { onSelect, onPause, onReset, onStartPlace, onConnectMode, onPreset, onView }) {
+  constructor(sim, { onSelect, onPause, onReset, onStartPlace, onConnectMode, onPreset, onView, onZoom }) {
+    this.onZoom = onZoom;
+    this.zoomed = false;
     this.onView = onView;
     this.view = 'app'; // zoomed-in view: the application's internals where there is one, else the hardware
     this.onStartPlace = onStartPlace;
@@ -285,6 +289,7 @@ export class UI {
     addEventListener('keydown', (e) => {
       if (e.key !== 'Escape') return;
       if (this.mode) this.setMode(null);
+      else if (this.zoomed) this.onZoom(false); // first Esc zooms out, the next deselects
       else this.onSelect(null);
     });
     $('connect').addEventListener('click', () => this.setMode(this.mode === 'connect' ? null : 'connect'));
@@ -538,6 +543,20 @@ export class UI {
     return `<div class="cost-row cost-avg" title="Mean of the monthly rate, sampled once a second"><span>Average over ${span}</span><b>${fmtUSD(a.avg)} / month</b></div><p class="hint cost-avg">${note}</p>`;
   }
 
+  // "Scheduled jobs per second": only shown while a scheduler is in the diagram. Log scale, 10 → 10,000.
+  _syncSched() {
+    const p = this.sim.params;
+    const el = $('sched');
+    if (!this._schedBound) {
+      this._schedBound = true;
+      el.addEventListener('input', () => (p.schedRate = Math.round(10 * Math.pow(1000, el.value / 100))));
+    }
+    $('sched-row').style.display = this.sim.nodes.scheduler.active ? '' : 'none';
+    const pos = Math.round((Math.log(Math.max(10, p.schedRate) / 10) / Math.log(1000)) * 100);
+    if (document.activeElement !== el && +el.value !== pos) el.value = pos;
+    $('v-sched').textContent = Math.round(p.schedRate).toLocaleString();
+  }
+
   _renderPalette() {
     const items = this.sim.placeable();
     const sig = items.map((n) => n.id).join();
@@ -576,14 +595,15 @@ export class UI {
   }
 
   // Build the right-hand panel for a node (or the intro when nothing is selected).
-  select(id) {
+  select(id, zoomed = this.zoomed) {
     this.selected = id;
+    this.zoomed = !!id && zoomed;
     const el = $('detail');
     this.charts = [];
     if (!id) {
       this._costSig = null;
       el.innerHTML =
-        `<h2>How to use</h2><p class="d-about">Each dot is a slice of live traffic. <b>Click any component</b> to zoom inside and see its CPU, memory, storage and network. Drag the floor to orbit, scroll to zoom. Use <b>Build</b> on the left to add components and wire them together.</p>` +
+        `<h2>How to use</h2><p class="d-about">Each dot is a slice of live traffic. <b>Click any component</b> to select it and see its live metrics here, then press <b>Zoom in</b> (or double-click it) to look inside: its internals, CPU, memory, storage and network. Drag the floor to orbit, scroll to zoom. Use <b>Build</b> on the left to add components and wire them together.</p>` +
         `<h2>Estimated cost</h2><div id="costs"></div>${pricingHTML()}` +
         `<h2>Experiments to try</h2><ol class="tips">${TIPS.map(([t, d]) => `<li><b>${t}.</b> ${d}</li>`).join('')}</ol>`;
       return;
@@ -591,12 +611,13 @@ export class UI {
     const node = this.sim.nodes[id];
     const info = NODE_INFO[node.type];
     el.innerHTML = `
-      <button id="d-back">← Overview</button>
+      <div class="btns d-nav"><button id="d-back" title="Deselect (Esc)">✕ Close</button><button id="d-zoom" class="primary">${this.zoomed ? '← Zoom out' : '🔍 Zoom in'}</button></div>
+      ${this.zoomed ? '' : `<p class="hint">Zoom in to look inside ${node.label}${APP_VIEW[node.type] ? ': how it works internally, and its hardware' : ': its CPU, memory, storage and network'}. Double-clicking it in the diagram does the same.</p>`}
       <div class="d-head" style="margin-top:10px">
         <div class="d-title">${node.tech ? logoSVG(node.tech.logo, 34) : ''}<div><h3>${node.label}</h3><div class="d-kind">${node.tech && node.tech.name !== node.label ? node.tech.name + ' · ' : ''}${node.kind || info.kind}</div></div></div>
         <span class="badge" id="d-badge"></span>
       </div>
-      ${APP_VIEW[node.type] ? `<div class="seg" id="d-view" role="group" aria-label="Zoomed-in view"><button data-view="app">${APP_VIEW[node.type]} internals</button><button data-view="hw">Hardware</button></div>` : ''}
+      ${this.zoomed && APP_VIEW[node.type] ? `<div class="seg" id="d-view" role="group" aria-label="Zoomed-in view"><button data-view="app">${APP_VIEW[node.type]} internals</button><button data-view="hw">Hardware</button></div>` : ''}
       ${
         TECH[node.type]
           ? `<label class="engine">Technology<select id="d-engine">${Object.entries(TECH[node.type])
@@ -638,6 +659,7 @@ export class UI {
         this.select(id);
       });
     $('d-back').addEventListener('click', () => this.onSelect(null));
+    $('d-zoom').addEventListener('click', () => this.onZoom(!this.zoomed));
     const seg = $('d-view');
     if (seg) {
       const mark = () => seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.view === this.view));
@@ -709,6 +731,8 @@ export class UI {
         return [['Produced', `${fmtRate(n.inRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Consumed (2 groups)', r(n.outRate, 'msg/s')], ['Lag: lake writer', `${fmtRate(n.lag)} of ${fmtRate(n.retention || 0)} retained`], [`Lag: ${this.sim.nodes.clickhouse.label}`, `${fmtRate(n.lagCH)} of ${fmtRate(n.retention || 0)} retained`], ['Lag per partition', n.partitions.map((v) => fmtRate(v)).join(' · ')], ['Expired unread', r(n.expiredRate, 'msg/s')]];
       case 'consumer':
         return [['Reading from Kafka', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Raw events in', fmtBytes(n.outRate * p.eventBytes)], ['Behind by', `${fmtRate(this.sim.nodes.kafka.lag)} msgs`], ['Parquet out → data lake', fmtBytes(this.sim.nodes.lake.ingestBytes)], ['Small files written', `${this.sim.techOf('consumer').files} per second`]];
+      case 'scheduler':
+        return [['Jobs falling due', r(p.schedRate, 'jobs/s')], ['Released to the queue', r(n.outRate, 'jobs/s')], ['Capacity', `${fmtRate(n.cap || 0)} jobs/s`], ['Handed to the queue ahead of time', n.window ? `${n.aheadSecs.toFixed(1)}s of ${n.window}s look-ahead` : 'none — no look-ahead'], ['Overdue, not yet enqueued', Math.round(n.missed).toLocaleString()], ['Start delay (target ≤ 2 s)', fmtDur(n.delay)], ['Enqueued late', r(n.lateRate, 'jobs/s')]];
       case 'connector': {
         const wh = this.sim.nodes.clickhouse;
         return [['Loading', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} rows/s`], ['Sink plugin', wh.tech.connector ? wh.tech.connector.plugin : '—'], ['Destination', wh.label], ['Unread in Kafka', `${fmtRate(this.sim.nodes.kafka.lagCH)} rows`], ['Batch flush interval', fmtDur(n.latency)]];
@@ -765,6 +789,7 @@ export class UI {
     $('t-cpm').textContent = cost.perMillion ? `per month · ${fmtUSD(cost.perMillion)} per 1M requests` : 'per month';
     this._renderPalette();
     this._syncDelivery();
+    this._syncSched();
     this._renderAuto();
     $('v-webCount').textContent = sim.webCount;
     this._syncDataTier(); // the database engine can change from the detail panel

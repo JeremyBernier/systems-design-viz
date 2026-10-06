@@ -968,3 +968,27 @@ select {
   border-color: var(--accent);
   background: rgb(57 135 229 / 0.2);
 }
+
+/* ---------- selected component, and the zoom button in its panel ---------- */
+.node-label.selected {
+  z-index: 3;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.node-label.selected .nl-role {
+  display: block;
+}
+.d-nav {
+  margin-top: 0;
+}
+.d-nav #d-back {
+  flex: none;
+}
+button.primary {
+  border-color: var(--accent);
+  background: rgb(57 135 229 / 0.25);
+  font-weight: 600;
+}
+.d-nav + .hint {
+  margin: 8px 0 0;
+}

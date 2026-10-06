@@ -55,6 +55,7 @@
       <label class="row"><span>Pattern</span><select id="pattern" aria-label="Traffic pattern"></select></label>
       <p class="hint" id="v-pattern"></p>
       <!-- /traffic pattern -->
+      <label class="row" id="sched-row" style="display: none"><span>Scheduled jobs per second</span><b id="v-sched"></b><input type="range" id="sched" min="0" max="100" step="1" /></label>
       <button id="spike" class="wide">⚡ Traffic spike (4× for 6s)</button>
       <label class="row">
         <span>Writes</span><b id="v-write"></b>

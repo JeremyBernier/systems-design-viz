@@ -2,6 +2,7 @@ import { TECH, DEFAULT_TECH } from './tech.js';
 import { DATA_DEFAULTS, CACHE_NODE_CAP, partialLoss, heal, cacheCluster, cacheStatus, dbCluster, dbStatus } from './datatier.js';
 import { ASSET_DEFAULTS, newAssetStats, assetTraffic, addAssetLoad } from './cdn.js';
 import { fnJobCapacity, functions } from './functions.js';
+import { SCHED_DEFAULTS, scheduler } from './scheduler.js';
 import { initReliability, reliability, recordReliability } from './latency.js';
 import { AUTO_PARAMS, trafficShape, scaleWeb, scaleWorkers } from './autoscale.js';
 
@@ -36,6 +37,8 @@ export const EDGE_TYPES = [
   ['cdn', 'blob'],
   ['web', 'blob'], // uploads, and asset reads when there is no CDN
   ['blob', 'fn'], // an upload event invokes a function
+  ['scheduler', 'db'], // reads which jobs fall due next
+  ['scheduler', 'queue'], // hands them over as delayed messages
   ['queue', 'fn'], // functions polling the queue, alongside the workers
 ];
 export const HISTORY = 240; // samples kept per metric (4 per second → 60s)
@@ -77,6 +80,7 @@ NIC_BPS.cdn = 400e9;
 NIC_BPS.blob = 100e9;
 NIC_BPS.fn = 10e9;
 NIC_BPS.connector = 1e9;
+NIC_BPS.scheduler = 1e9;
 // Connections that are possible but not made until the user asks: functions on the queue would hide what the workers teach.
 const OPTIONAL_EDGES = new Set(['queue>fn']);
 
@@ -99,6 +103,7 @@ export const SPECS = {
   blob: { cores: 0, ramGB: 0, diskGB: 0 }, // managed object storage
   fn: { cores: 0, ramGB: 0, diskGB: 0 }, // serverless: no machine of yours
   connector: { cores: 8, ramGB: 32, diskGB: 100 }, // two 4-vCPU Kafka Connect workers
+  scheduler: { cores: 4, ramGB: 8, diskGB: 50 },
 };
 
 export function fmtGB(gb) {
@@ -217,6 +222,12 @@ export const NODE_INFO = {
   },
 };
 
+NODE_INFO.scheduler = {
+  title: 'Scheduler',
+  kind: 'Runs jobs at a time, not on a request',
+  about:
+    'Work that must happen at a set time or on a repeating schedule: send the 9 am digest, bill every subscription on the 1st, retry a payment in an hour. It reads the database for executions that are coming due and puts them on the job queue for the workers. Reading a little ahead and using delayed messages lets it start each job within a couple of seconds of its time without polling the database constantly.',
+};
 NODE_INFO.connector = {
   title: 'Connector',
   kind: 'Kafka → warehouse sink',
@@ -272,6 +283,7 @@ export class Sim {
       pricing: 'ondemand', // key of PRICING in tech.js: how instance-hours are bought
       spotWorkers: false, // run worker VMs on spot capacity (changes cost only)
       ...DATA_DEFAULTS, // dbReplicas, dbShards, cacheNodes (datatier.js)
+      ...SCHED_DEFAULTS, // schedRate (scheduler.js)
     };
     this.listeners = { crash: [], recover: [], log: [] };
     Object.assign(this.params, ASSET_DEFAULTS); // static asset / media profile, see cdn.js
@@ -315,6 +327,8 @@ export class Sim {
     n.blob = makeNode('blob', 'blob', { objects, storedGB: (objects * this.params.assetKB) / 1e6, putRate: 0, getRate: 0 });
     this.assets = newAssetStats();
     n.connector = makeNode('connector', 'connector');
+    n.scheduler = makeNode('scheduler', 'scheduler', { aheadJobs: 0, missed: 0, aheadSecs: 0, lateRate: 0, delay: 0 });
+    n.scheduler.active = false; // an optional building block: only some systems run jobs on a schedule
     n.fn = makeNode('fn', 'fn', { warm: 0, concurrency: 0, coldPct: 0, upRate: 0, jobRate: 0, limit: 0 });
     this.nodes = n;
     for (const type in this.params.tech) this.setTech(type, this.params.tech[type], true);
@@ -334,10 +348,11 @@ export class Sim {
 
   // Rebuild the system from a preset: components, technologies and traffic shape.
   applyPreset(preset) {
-    Object.assign(this.params, WORKLOAD, DATA_DEFAULTS, preset.params, preset.workload, preset.data, { tech: { ...DEFAULT_TECH, ...preset.tech } });
+    Object.assign(this.params, WORKLOAD, DATA_DEFAULTS, SCHED_DEFAULTS, preset.params, preset.workload, preset.data, { tech: { ...DEFAULT_TECH, ...preset.tech } });
     this.reset();
     while (this.webCount < preset.webs) this.setActive(this.webs.find((w) => !w.active).id, true);
     for (const id of preset.remove) this.nodes[id].active = false;
+    for (const id of preset.add || []) this.nodes[id].active = true;
     this._syncConnector();
   }
 
@@ -701,6 +716,11 @@ export class Sim {
         ? 'Down. All reads now go straight to the database, and the cache will come back empty.'
         : '';
     }
+
+    // ---------- scheduler: reads what is due from the database, releases it to the job queue ----------
+    const sched = scheduler(this, dt, queueUp, ease);
+    dbReadsArr += sched.reads;
+    jobsArr += sched.jobs;
 
     // ---------- database ----------
     const eng = this.techOf('db');
@@ -1122,8 +1142,10 @@ export class Sim {
     }
 
     // ---------- totals ----------
-    const ok = cacheHits + dbReadOk + dbWriteOk;
-    const err = Math.max(0, incoming - lbOut) + webDrop + dbFail + noRoute;
+    // the scheduler's own database reads are not user requests: keep them out of served / failed
+    const schedOk = dbReadsArr > 0 ? sched.reads * (dbReadOk / dbReadsArr) : 0;
+    const ok = cacheHits + dbReadOk + dbWriteOk - schedOk;
+    const err = Math.max(0, incoming - lbOut) + webDrop + Math.max(0, dbFail - (sched.reads - schedOk)) + noRoute;
     const t = this.totals;
     t.in = ease(t.in, incoming, dt, 0.2);
     t.ok = ease(t.ok, ok, dt, 0.3);
@@ -1168,6 +1190,8 @@ export class Sim {
     f['trino>lake<'] = lake.getRate;
     f['queue>worker'] = jobsDone - fnJobs;
     f['queue>fn'] = fnJobs;
+    f['scheduler>db'] = N.scheduler.inRate;
+    f['scheduler>queue'] = N.scheduler.outRate;
     f['blob>fn'] = N.fn.upRate;
 
     this._findBottleneck();

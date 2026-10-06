@@ -501,6 +501,21 @@ export const TECH = {
 
 // ------------------------------------------------------------------ event-driven functions
 // limit: concurrent executions the platform allows · billed per invocation and per second of run time (1 GB)
+// ------------------------------------------------------------------ job scheduler
+// cap: executions/s it can schedule · window: seconds of look-ahead handed to the queue as delayed messages
+TECH.scheduler = {
+  watcher: {
+    name: 'Watcher service', vendor: 'Self-hosted', logo: badge('⏱', '#5b6cff'), kind: 'Two-phase scheduler (query ahead + delay queue)',
+    about: 'The design from the job-scheduler interview problem. A small stateless service wakes every few minutes, asks the database for every execution due in the next window, and puts each on the queue with a delivery delay. The queue then releases each message at its exact time. Two copies run for availability, and if both die the jobs already handed over still fire on schedule — you have the length of the window to notice.',
+    cap: 20000, window: 10, cost: () => vm(0.096, 2), basis: 'Two m5.large containers (2 vCPU, 8 GB) at $0.096/h each',
+  },
+  cron: {
+    name: 'Cron on one VM', vendor: 'Self-hosted', logo: badge('cron', '#4a4a48'), kind: 'Single-machine scheduler',
+    about: 'Where most systems start: one machine runs a loop every second, reads the jobs due right now and enqueues them. Simple, but there is no look-ahead and no second copy — when the machine is down, jobs due in that moment are simply late — and one process polling the database tops out at a few hundred jobs a second.',
+    cap: 500, window: 0, cost: () => vm(0.096), basis: 'One m5.large (2 vCPU, 8 GB) at $0.096/h',
+  },
+};
+
 // ------------------------------------------------------------------ Kafka → warehouse connector
 // cap: rows/s its tasks can load. Only present when the chosen warehouse has `connector` set.
 TECH.connector = {
@@ -534,7 +549,7 @@ TECH.fn = {
 export const DEFAULT_TECH = {
   lb: 'nginx', web: 'ec2', cache: 'redis', db: 'postgres', queue: 'rabbitmq', worker: 'ec2',
   kafka: 'kafka', consumer: 'flink', lake: 's3iceberg', clickhouse: 'clickhouse', trino: 'trino', bi: 'grafana',
-  cdn: 'cloudfront', blob: 's3', fn: 'lambda', connector: 'kconnect',
+  cdn: 'cloudfront', blob: 's3', fn: 'lambda', connector: 'kconnect', scheduler: 'watcher',
 };
 
 export { HOURS, SECONDS, GB };

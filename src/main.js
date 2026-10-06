@@ -9,10 +9,17 @@ import { DEFAULTS as REL_DEFAULTS } from './latency.js';
 const sim = new Sim();
 let paused = false;
 
-const select = (id) => {
-  scene.focus(id);
-  ui.select(id);
+// Selecting a component highlights it and opens its panel; zooming inside is a second, explicit step.
+let zoomed = false;
+const show = (id, zoom) => {
+  zoomed = !!id && zoom;
+  scene.select(id);
+  const focus = zoomed ? id : null;
+  if (focus !== scene.focusId) scene.focus(focus); // otherwise leave the camera where the user put it
+  ui.select(id, zoomed);
 };
+const select = (id) => show(id, zoomed); // while zoomed in, picking another component moves the zoom to it
+const zoom = (on, id = ui.selected) => show(id, on);
 
 const applyPreset = (preset) => {
   sim.applyPreset(preset);
@@ -22,6 +29,7 @@ const applyPreset = (preset) => {
 
 const scene = new Scene(document.getElementById('stage'), sim, {
   onSelect: select,
+  onZoom: (id) => zoom(true, id),
   onPlace: (id, pt) => {
     sim.setActive(id, true, false);
     scene.placeAt(id, pt);
@@ -45,6 +53,7 @@ const scene = new Scene(document.getElementById('stage'), sim, {
 });
 const ui = new UI(sim, {
   onSelect: select,
+  onZoom: zoom,
   onPause: () => (paused = !paused),
   onPreset: applyPreset,
   onStartPlace: (id) => scene.startPlacing(id),
@@ -101,11 +110,11 @@ if (link.preset) ui.setPreset(link.preset);
 for (let i = 0, n = link.t * 30; i < n; i++) sim.step(STEP); // ?t=20 skips ahead 20s
 booted = true;
 ui.syncControls();
-if (sim.nodes[link.focus] && sim.nodes[link.focus].active) select(link.focus);
+if (sim.nodes[link.focus] && sim.nodes[link.focus].active) zoom(true, link.focus); // ?focus= opens zoomed in
 
 // Save and share: keep the address bar holding a link that rebuilds this exact system.
 // Polled from the UI tick rather than hooked into each control, so nothing can be missed.
-const linkQuery = () => serialise(sim, { preset: document.getElementById('preset').value, focus: ui.selected, t: q.get('t') });
+const linkQuery = () => serialise(sim, { preset: document.getElementById('preset').value, focus: zoomed ? ui.selected : null, t: q.get('t') });
 const linkURL = (s) => location.pathname + (s ? '?' + s : '') + location.hash;
 let linkShown = linkQuery();
 let linkTimer = 0;

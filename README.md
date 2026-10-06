@@ -8,8 +8,8 @@ npm run dev
 ```
 
 - Drag the traffic slider (20 → 20,000 req/s, log scale) and watch bottlenecks appear, backlogs grow and nodes explode.
-- Click any component to zoom in and see its CPU, memory, storage and network, with live metrics in the side panel. `Esc` returns to the overview.
-- **System** presets (YouTube, Instagram, Uber, a simple web app) reconfigure components, technologies and traffic.
+- Click any component to select it: it is highlighted and its live metrics open in the side panel. Press **Zoom in** there (or double-click the component) to look inside — the queue, database and functions have an internals view, and every component has a hardware view of CPU, memory, storage and network. `Esc` zooms out, then deselects.
+- **System** presets (YouTube, Instagram, Uber, a job scheduler, a simple web app) reconfigure components, technologies and traffic.
 - **Build**: place components, drag them around, and use *Connect components* to wire sensible pairs together. Click a component to change its technology (e.g. PostgreSQL → DynamoDB, EC2 → Lambda), toggle its connections or remove it.
 - **Traffic patterns** shape the slider's rate over time: a daily cycle (one day per 2 minutes, slider = evening peak, trough at ~30% of it), a launch-day ramp, and a flash crowd (5× within seconds, fading slowly). The 6-second spike button still works on top.
 - **Autoscaling**: the web tier uses target tracking on average CPU (min / max servers, target %); workers scale on queue backlog per worker. New capacity is not instant — an EC2 or Compute Engine VM takes ~18 simulated seconds to come into service (≈3 min in real life), Fargate ~6 s, Kubernetes ~4 s, while Lambda and Cloud Run scale at once and pay a cold start instead. Scale-in waits for 15 s of low load and removes one server at a time. The cost breakdown shows the average over the last cycle, so an autoscaled fleet can be compared with one sized for the peak.

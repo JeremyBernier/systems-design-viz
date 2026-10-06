@@ -1,0 +1,254 @@
+/* ---------- technology comparison: trade-offs in the panel, and the compare dialog ---------- */
+.trade {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 6px 0 8px;
+  font-size: 12px;
+}
+.trade b {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-2);
+  font-weight: 600;
+}
+.trade ul,
+.cmp-table ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.trade li,
+.cmp-table li {
+  position: relative;
+  padding-left: 14px;
+  margin: 3px 0;
+  color: var(--text-2);
+  line-height: 1.35;
+}
+.trade li::before,
+.cmp-table li::before {
+  position: absolute;
+  left: 0;
+  font-weight: 700;
+}
+.gain li::before {
+  content: '+';
+  color: var(--good);
+}
+.lose li::before {
+  content: '−';
+  color: var(--serious);
+}
+.ops {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+}
+.ops i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--axis);
+}
+.ops i.on {
+  background: var(--text-2);
+}
+.ops span {
+  margin-left: 5px;
+  color: var(--text-2);
+}
+.trade-ops {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+#compare {
+  width: min(1180px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--axis);
+  border-radius: 10px;
+  overflow: hidden;
+}
+#compare[open] {
+  display: flex;
+  flex-direction: column;
+}
+#compare::backdrop {
+  background: rgb(0 0 0 / 0.6);
+}
+#compare h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.cmp-body {
+  padding: 14px 16px 18px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.cmp-body h2 {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 6px;
+}
+.cmp-body section + section {
+  margin-top: 20px;
+}
+.cmp-sum {
+  margin: 0 0 10px;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.cmp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.cmp-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.cmp-legend i {
+  width: 16px;
+  height: 0;
+  border-top: 2px solid;
+}
+.cmp-legend i.other {
+  border-top-style: dashed;
+}
+.cmp-legend em {
+  font-style: normal;
+  color: var(--muted);
+}
+.cmp-chart {
+  position: relative;
+  margin-top: 6px;
+}
+.cmp-chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.cmp-chart text {
+  font: 11px/1 inherit;
+  fill: var(--muted);
+}
+.cmp-chart text.lab {
+  fill: var(--text-2);
+}
+.cmp-tip {
+  position: absolute;
+  top: 8px;
+  z-index: 2;
+  min-width: 190px;
+  padding: 8px 10px;
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--axis);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 0.5);
+  pointer-events: none;
+}
+.cmp-tip b {
+  display: block;
+  margin-bottom: 4px;
+}
+.cmp-tip div {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+}
+.cmp-tip div span {
+  margin-left: auto;
+  padding-left: 14px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.cmp-tip i {
+  width: 10px;
+  height: 0;
+  border-top: 2px solid;
+}
+.cmp-scroll {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.cmp-table {
+  width: 100%;
+  min-width: 1040px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.cmp-table th,
+.cmp-table td {
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  border-top: 1px solid var(--line);
+  line-height: 1.4;
+}
+.cmp-table thead th {
+  border-top: 0;
+  color: var(--muted);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.cmp-table tbody th {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.cmp-table tr.on {
+  background: rgb(57 135 229 / 0.1);
+}
+.cmp-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cmp-name small {
+  display: block;
+  color: var(--muted);
+  font-weight: 400;
+}
+.cmp-table th button,
+.cmp-table th em {
+  margin-top: 6px;
+  font-size: 11px;
+}
+.cmp-table th em {
+  display: inline-block;
+  font-style: normal;
+  color: var(--accent);
+}
+.cmp-cost b {
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+.cmp-cost small {
+  display: block;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.cmp-cost u {
+  display: block;
+  height: 4px;
+  min-width: 2px;
+  margin-top: 5px;
+  border-radius: 0 2px 2px 0;
+  background: var(--accent);
+}
+.cmp-table td.dim {
+  color: var(--text-2);
+}

@@ -74,6 +74,7 @@ export function initModelUI(ui, sim) {
   let current = null;
   const dlg = document.createElement('dialog');
   dlg.id = 'planner';
+  dlg.className = 'dlg';
   dlg.innerHTML = `
     <form method="dialog" class="pl-head"><div><h3>Plan from users</h3><p class="hint">Start from product numbers, the way a system design interview or a real sizing exercise does. Every answer shows its arithmetic.</p></div><button aria-label="Close">✕</button></form>
     <div class="pl-body">

@@ -1,4 +1,4 @@
-import { TECH, DEFAULT_TECH } from './tech.js';
+import { TECH, DEFAULT_TECH, chipOf } from './tech.js';
 import { DATA_DEFAULTS, CACHE_NODE_CAP, partialLoss, heal, cacheCluster, cacheStatus, dbCluster, dbStatus } from './datatier.js';
 import { ASSET_DEFAULTS, newAssetStats, assetTraffic, addAssetLoad } from './cdn.js';
 import { fnJobCapacity, functions } from './functions.js';
@@ -74,13 +74,17 @@ export const WORKLOAD_INFO = {
   jobRate: { label: 'Worker throughput', unit: 'jobs/s', scale: 1, min: 1, max: 5000, tip: 'Jobs/s one 4-vCPU worker completes.' },
 };
 // Link speed of each machine's network card, in bits per second.
-export const NIC_BPS = { client: 10e9, lb: 10e9, web: 1e9, cache: 1e9, db: 1e9, kafka: 1e9, consumer: 1e9, queue: 1e9, worker: 1e9, lake: 10e9, clickhouse: 10e9, trino: 10e9, bi: 1e9 };
+// Sustained network bandwidth per machine: the *baseline* AWS publishes for the default instance of each
+// role (c5 / m5 / r6g: .large 0.75, .xlarge 1.25, .2xlarge 2.5, .4xlarge 5 Gbps). Each can burst to 10 Gbps
+// for a while on credits, which a server under constant load cannot count on. The load balancer keeps
+// 10 Gbps: the presets use managed ones, which are not a single small VM.
+export const NIC_BPS = { client: 10e9, lb: 10e9, web: 2.5e9, cache: 1.25e9, db: 5e9, kafka: 2.5e9, consumer: 2.5e9, queue: 1.25e9, worker: 1.25e9, lake: 10e9, clickhouse: 5e9, trino: 5e9, bi: 1.25e9 };
 // Managed services have no card of yours; these are the slice of the provider's network a system this size could draw on.
 NIC_BPS.cdn = 400e9;
 NIC_BPS.blob = 100e9;
 NIC_BPS.fn = 10e9;
-NIC_BPS.connector = 1e9;
-NIC_BPS.scheduler = 1e9;
+NIC_BPS.connector = 1.25e9;
+NIC_BPS.scheduler = 0.75e9;
 // Connections that are possible but not made until the user asks: functions on the queue would hide what the workers teach.
 const OPTIONAL_EDGES = new Set(['queue>fn']);
 
@@ -113,13 +117,39 @@ export function fmtGB(gb) {
   return Math.round(gb * 1000) + ' MB';
 }
 
+// What each kind of machine spends its CPU on, and the rate that counts it: [unit of work, node field].
+// Left out where one figure would mislead: the OLAP database's CPU is shared by queries, inserts and merges.
+const CPU_WORK = {
+  lb: ['request', 'outRate'],
+  web: ['request', 'outRate'],
+  cache: ['lookup', 'inRate'],
+  db: ['operation', 'outRate'],
+  queue: ['job', 'inRate'],
+  worker: ['job', 'outRate'],
+  kafka: ['event', 'inRate'],
+  consumer: ['event', 'outRate'],
+  connector: ['row', 'outRate'],
+  trino: ['query', 'outRate'],
+};
+const fmtCpuTime = (s) => (s >= 1 ? parseFloat(s.toFixed(2)) + ' s' : s >= 1e-3 ? parseFloat((s * 1e3).toPrecision(2)) + ' ms' : Math.round(s * 1e6) + ' µs');
+
 // "used / total" in real units for one of a node's four resources.
 export function rawMetric(node, key, params) {
   if (node.serverless && (key === 'cpu' || key === 'mem')) return 'managed by the cloud provider';
   if (node.managedDisk && key === 'disk') return `${fmtGB(node.storedGB)} stored · no fixed limit`;
   const spec = node.spec || SPECS[node.type];
   const n = node.type === 'worker' ? params.workerCount : node.fleet || 1; // database and cache report their whole fleet
-  if (key === 'cpu') return `${(node.cpu * spec.cores * n).toFixed(1)} / ${spec.cores * n} cores`;
+  if (key === 'cpu') {
+    const total = spec.cores * n;
+    const busy = node.cpu * total;
+    const [unit, field] = CPU_WORK[node.type] || [];
+    const rate = unit ? node[field] : 0;
+    // CPU time per unit of work = busy vCPUs ÷ throughput. It includes the machine's idle overhead
+    // (OS, runtime, health checks), so it reads higher at low load, as it does on a real server.
+    const per = rate >= 1 ? ` · ${fmtCpuTime(busy / rate)} of CPU per ${unit}` : '';
+    const chip = chipOf(node.tech);
+    return `${busy.toFixed(1)} of ${total} vCPUs busy · ${(total - busy).toFixed(1)} idle${chip ? ` · ${chip.ghz}` : ''}${per}`;
+  }
   if (key === 'mem') return `${fmtGB(node.mem * spec.ramGB * n)} / ${fmtGB(spec.ramGB * n)}`;
   if (key === 'disk') return `${fmtGB(node.disk * spec.diskGB * n)} / ${fmtGB(spec.diskGB * n)}`;
   return `${fmtBits(node.bps)} / ${fmtBits(NIC_BPS[node.type])}`;
@@ -241,6 +271,9 @@ NODE_INFO.fn = {
     'Small pieces of code the cloud runs in response to events, with no server of yours. Here an upload landing in object storage triggers one (resize the photo, start a transcode), and it can also be connected to the job queue to take jobs alongside the workers. Capacity is counted in concurrent executions, the first event after a quiet spell pays a cold start, and you are billed per invocation and per second of run time.',
 };
 
+// Names for components a preset does not name. The web tier is a service, not "a web server".
+const DEFAULT_NAMES = { web: 'API Service', worker: 'Background Workers' };
+
 function makeNode(id, type, extra = {}) {
   return {
     id,
@@ -303,7 +336,9 @@ export class Sim {
     n.lb = makeNode('lb', 'lb');
     this.webs = [];
     for (let i = 0; i < MAX_WEB; i++) {
-      const w = makeNode('web' + i, 'web', { label: 'Web Server ' + (i + 1), index: i, threads: 0 });
+      const w = makeNode('web' + i, 'web', { index: i, threads: 0 });
+      // replicas of one service: numbered only while there is more than one of them
+      Object.defineProperty(w, 'label', { enumerable: true, get: () => (this.webCount > 1 ? `${this.roleName('web')} ${i + 1}` : this.roleName('web')) });
       w.active = i < 2;
       n[w.id] = w;
       this.webs.push(w);
@@ -333,6 +368,7 @@ export class Sim {
     this.nodes = n;
     for (const type in this.params.tech) this.setTech(type, this.params.tech[type], true);
     // every sensible connection starts wired up
+    for (const id in n) if (n[id].type !== 'web') n[id].label = this.roleName(n[id].type);
     this.edges = new Set();
     for (const id in n) for (const e of this.possibleEdges(id)) if (!OPTIONAL_EDGES.has(e.id)) this.edges.add(e.id);
     this.time = 0;
@@ -346,8 +382,15 @@ export class Sim {
     this._syncConnector();
   }
 
+  // What a component is called: the job it does in this system ("Transcoding Workers"), from the preset's
+  // `names`, falling back to the generic title of its kind. The technology is shown beneath it, not instead.
+  roleName(type) {
+    return (this.names && this.names[type]) || DEFAULT_NAMES[type] || NODE_INFO[type].title;
+  }
+
   // Rebuild the system from a preset: components, technologies and traffic shape.
   applyPreset(preset) {
+    this.names = preset.names || {};
     Object.assign(this.params, WORKLOAD, DATA_DEFAULTS, SCHED_DEFAULTS, preset.params, preset.workload, preset.data, { tech: { ...DEFAULT_TECH, ...preset.tech } });
     this.reset();
     while (this.webCount < preset.webs) this.setActive(this.webs.find((w) => !w.active).id, true);
@@ -370,13 +413,11 @@ export class Sim {
       if (node.type !== type) continue;
       Object.assign(node, { tech: t, kind: t.kind, about: t.about, spec: t.spec || null, serverless: !!t.serverless, managedDisk: !!t.managedDisk, restartSecs: t.restart || 8 });
       node.queue = node.stress = 0;
-      // databases are known by their product name
-      if (type === 'db' || type === 'clickhouse' || type === 'fn') node.label = t.name;
       if (type === 'db') node.diskUsed = 0.35;
       if (type === 'clickhouse') Object.assign(node, { parts: t.parts ? 20 : 0, tooManyParts: false });
     }
     if (type === 'clickhouse') this._syncConnector();
-    if (!quiet) this.emit('log', 'good', `${NODE_INFO[type].title} is now ${t.name}`);
+    if (!quiet) this.emit('log', 'good', `${this.roleName(type)} is now ${t.name}`);
   }
 
   // Every connection this node could have, as { id: 'from>to', other, out }.
@@ -882,12 +923,12 @@ export class Sim {
     conn.bps = inserted * EVENT_BYTES * 8 * 2; // read from Kafka, written to the warehouse
     conn.latency = olap.connector ? olap.connector.flush : 0;
     conn.status = off(conn)
-      ? `Down. ${ch.label} gets no new rows and its dashboards go stale, while Kafka keeps the events until it returns.`
+      ? `Down. ${ch.tech.name} gets no new rows and its dashboards go stale, while Kafka keeps the events until it returns.`
       : !connUp
         ? 'Not wired between the event stream and the warehouse, so nothing is being loaded.'
         : CONN_CAP < whCap && produced > CONN_CAP
           ? `At its limit: its tasks load ${fmtRate(CONN_CAP)} rows/s and events arrive faster, so lag builds in Kafka. Real fixes: more tasks, more topic partitions.`
-          : `Healthy. Consuming the topic and loading ${ch.label} in batches every ~${conn.latency}s.`;
+          : `Healthy. Consuming the topic and loading ${ch.tech.name} in batches every ~${conn.latency}s.`;
     const maxLag = Math.max(kafka.lag, kafka.lagCH);
     if (!off(kafka)) {
       kafka.expiredRate = ease(kafka.expiredRate, expired / dt, dt, 0.2);
@@ -903,7 +944,7 @@ export class Sim {
         kafka.expiredRate > 1
           ? 'Retention limit hit: the oldest unread events are being deleted before a consumer reaches them. That data is lost.'
           : maxLag > 2000
-            ? `${kafka.lag > kafka.lagCH ? 'The lake writer' : ch.label} is falling behind: events are produced faster than it reads them. Nothing breaks yet — the log just gets longer.`
+            ? `${kafka.lag > kafka.lagCH ? 'The lake writer' : ch.tech.name} is falling behind: events are produced faster than it reads them. Nothing breaks yet — the log just gets longer.`
             : 'Healthy. Both consumer groups read events as fast as they are produced.';
     } else {
       kafka.outRate = kafka.util = kafka.cpu = kafka.bps = kafka.diskIO = kafka.expiredRate = 0;
@@ -1065,7 +1106,7 @@ export class Sim {
         ? 'Queries are failing. Analysts see errors and spinning dashboards.'
         : bi.freshCH > 30
           ? `Dashboards load, but the numbers are ${fmtDur(bi.freshCH)} out of date because ingestion is behind.`
-          : `Healthy. Real-time panels read ${ch.label}; ad-hoc SQL goes through Trino to the lake.`;
+          : `Healthy. Real-time panels read ${ch.tech.name}; ad-hoc SQL goes through Trino to the lake.`;
 
     // ---------- queue + workers ----------
     const queue = N.queue;

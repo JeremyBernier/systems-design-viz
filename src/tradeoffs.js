@@ -199,7 +199,9 @@ export function compare(sim, node) {
   const cheapest = [];
   xs.forEach((x, i) => {
     if (!i) return; // at zero load everything usage-priced is free; start from the first real sample
-    const best = rows.reduce((a, b) => (b.ys[i] < a.ys[i] - 1e-9 ? b : a));
+    // a tie, or a saving under 1%, is not a reason to switch: stay with the previous answer
+    const prev = cheapest.length ? rows.find((r) => r.key === cheapest[cheapest.length - 1].key) : rows.find((r) => r.current) || rows[0];
+    const best = rows.reduce((a, b) => (b.ys[i] < a.ys[i] * 0.99 ? b : a), prev);
     const last = cheapest[cheapest.length - 1];
     if (last && last.key === best.key) last.to = x;
     else cheapest.push({ key: best.key, name: best.tech.name, from: i === 1 ? 0 : x, to: x });

@@ -297,7 +297,8 @@ export const TECH = {
     msk: {
       name: 'AWS MSK', vendor: 'AWS', logo: badge('MSK', AWS), kind: 'Managed Kafka',
       about: 'Real Apache Kafka, with AWS running the brokers, patching and replacing failed ones. Identical behaviour to self-hosted Kafka at roughly twice the machine price.',
-      cap: 25000, retention: 150000, restart: 4, cost: () => 0.84 * HOURS + 2000 * 0.1, // not vm(): MSK brokers have no reserved or savings-plan pricing basis: 'kafka.m5.2xlarge broker at $0.84/h + 2 TB storage',
+      cap: 25000, retention: 150000, restart: 4, // not vm(): MSK brokers have no reserved or savings-plan pricing
+      cost: () => 0.84 * HOURS + 2000 * 0.1, basis: 'kafka.m5.2xlarge broker at $0.84/h + 2 TB storage',
     },
     kinesis: {
       name: 'AWS Kinesis', vendor: 'AWS', logo: badge('KDS', AWS), kind: 'Managed stream (shards)', serverless: true,
@@ -562,6 +563,23 @@ const isLight = (hex) => {
 };
 
 // Inline SVG badge: brand colour tile with the glyph (or letters) on top.
+// ------------------------------------------------------------------ processors
+// The CPU behind each instance family, as published by AWS and Google Cloud. A clock speed says how fast
+// one core steps, not how much work it does per step, so GHz compares machines of one family, not an
+// Intel core with an Arm one. smt: a vCPU is one of a core's two hyperthreads rather than a whole core.
+const CHIPS = {
+  c5: { name: 'Intel Xeon Platinum 8000 series (Skylake or Cascade Lake)', ghz: '3.4–3.6 GHz', what: 'sustained all-core turbo', smt: true },
+  m5: { name: 'Intel Xeon Platinum 8175M or 8259CL', ghz: 'up to 3.1 GHz', what: 'all-core turbo', smt: true },
+  r6g: { name: 'AWS Graviton2 (Arm Neoverse N1)', ghz: '2.5 GHz', what: 'fixed: no turbo', smt: false },
+  c2: { name: 'Intel Xeon Gold 6253CL (Cascade Lake)', ghz: '3.8 GHz', what: 'all-core turbo; 3.1 GHz base', smt: true },
+};
+// The family is read from `basis`, the one place an entry names its instance type, so the two cannot disagree.
+// → the chip, or null when the provider does not say what a managed service runs on (or it is your own hardware).
+export function chipOf(tech) {
+  const m = tech && !tech.serverless && /\b(c5|m5|r6g|c2)[.-]/.exec(tech.basis || '');
+  return m ? CHIPS[m[1]] : null;
+}
+
 export function logoSVG(logo, size = 16) {
   if (!logo) return '';
   const fg = isLight(logo.color) ? '#0b0b0b' : '#ffffff';

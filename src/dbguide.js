@@ -224,6 +224,7 @@ const TABS = [
 export function initDbGuide(ui, sim) {
   const dlg = document.createElement('dialog');
   dlg.id = 'dbguide';
+  dlg.className = 'dlg';
   dlg.innerHTML = `
     <form method="dialog" class="pl-head"><div><h3>Databases and their tradeoffs</h3><p class="hint">No database is best at everything. Each one buys something — scale, speed, flexibility, safety, less work — by giving something else up.</p></div><button aria-label="Close">✕</button></form>
     <div class="seg dg-tabs" role="group" aria-label="Guide section">${TABS.map(([k, t]) => `<button data-tab="${k}">${t}</button>`).join('')}</div>

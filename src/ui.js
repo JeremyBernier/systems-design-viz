@@ -1,10 +1,12 @@
 import { NODE_INFO, HISTORY, fmtRate, fmtDur, fmtBits, fmtBytes, fmtGB, rawMetric } from './sim.js';
-import { TECH, logoSVG } from './tech.js';
+import { TECH, logoSVG, chipOf } from './tech.js';
 import { PRESETS } from './presets.js';
 import { costs, nodeCost, fmtUSD } from './cost.js';
 import { loadLevel, APP_VIEW } from './scene.js';
 import { initModelUI, pricingHTML, syncPricing } from './modelui.js';
 import { initDbGuide } from './dbguide.js';
+import { initNumbers } from './numbers.js';
+import { initCompareUI, tradeHTML } from './compareui.js';
 import { DATA_STEP, MAX_REPLICAS, SHARD_STEPS, MAX_CACHE_NODES, CACHE_NODE_CAP } from './datatier.js';
 import { fmtTTL } from './cdn.js';
 import { RETRY_POLICIES, SLO_TARGETS } from './latency.js';
@@ -16,6 +18,14 @@ const pct = (v) => Math.round(v * 100) + '%';
 
 const LEVEL_WORD = { good: 'Healthy', warning: 'Busy', serious: 'Hot', critical: 'Overloaded', down: 'Down' };
 const STATUS_VAR = { good: '--good', warning: '--warning', serious: '--serious', critical: '--critical', down: '--down' };
+
+// The processor under the CPU meter: its name and clock speed, and what a vCPU is on it.
+function chipNote(node) {
+  if (!node.tech || node.tech.serverless) return '';
+  const chip = chipOf(node.tech);
+  if (!chip) return '<div class="m-note">Processor: not published for this service, so no clock speed is shown.</div>';
+  return `<div class="m-note">${chip.name} · ${chip.ghz} (${chip.what}). ${chip.smt ? 'A vCPU here is one hyperthread: two vCPUs share a physical core.' : 'A vCPU here is a whole physical core.'}</div>`;
+}
 
 const RESOURCES = [
   ['cpu', 'CPU'],
@@ -68,7 +78,7 @@ const TIPS = [
   ['Failover, and losing one node of many', 'Give the database a read replica and kill it: writes fail for about 30 s while the replica is promoted, but reads keep flowing. Compare with no replica. Then give the cache 3 nodes and kill it: one node dies and only a third of the keys go cold.'],
   ['Kill the scheduler', 'Pick the Job Scheduler system and kill the Scheduler. For ten seconds nothing is late: those jobs were already handed to the queue as delayed messages. Then the overdue count climbs, and on restart the backlog lands on the workers at 3× the normal rate. Switch its technology to Cron on one VM and kill it again: jobs are missed at once, and it cannot keep up with the load at all.'],
   ['Functions on the queue', 'Click Connect components, then the job queue and the functions component. Lambda now polls the queue next to the worker machines: a backlog that took minutes to drain is gone in seconds, with no machines to add — and a per-invocation line appears on the bill. Zoom into it to watch environments cold-start, stay warm, then get reclaimed.'],
-  ['Remove the CDN', 'Pick the Instagram or YouTube system, click the CDN and remove it. Every photo and video now squeezes through the web servers: their network cards saturate at 1 Gbps while the CPU sits idle, most asset requests fail, and "Data transfer out" takes the CDN\'s place on the bill.'],
+  ['Remove the CDN', 'Pick the Instagram or YouTube system, click the CDN and remove it. Every photo and video now squeezes through the load balancer and the web servers: their network links fill up while the CPU sits idle, most asset requests fail, and "Data transfer out" takes the CDN\'s place on the bill.'],
   ['Cold edge', 'Kill the CDN and let it restart, or drag the CDN cache TTL down to a few seconds. Misses pour into object storage until the edge is warm again; switch the CDN to Cloudflare or Fastly and each of those bytes is also billed as origin egress.'],
   ['Retry storm', 'At ~800 req/s set client retries to Naive and hit Traffic spike. Offered load jumps to 4× the real traffic and stays there after the spike has passed, until the servers run out of memory. Repeat with Backoff + budget: the same spike is over in seconds.'],
   ['A failure that never heals', 'Switch the web servers to AWS Lambda (it sheds load instead of crashing), set ~2,500 req/s, a 0.5 s client timeout and Naive retries, then spike. Nothing is broken and the spike is long gone, yet every request fails — until you change the retry policy or cut traffic.'],
@@ -282,6 +292,8 @@ export class UI {
     // --- model your own system: workload assumptions, pricing model, capacity planner (modelui.js)
     initModelUI(this, sim);
     initDbGuide(this, sim);
+    initNumbers(sim);
+    initCompareUI(this, sim); // trade-offs and the side-by-side technology comparison (compareui.js)
 
     $('detail').addEventListener('click', (e) => {
       const row = e.target.closest('.cost-row[data-id]');
@@ -634,6 +646,7 @@ export class UI {
             }` + (node.type === 'db' || node.type === 'clickhouse' ? `<button id="d-guide" class="wide" data-type="${node.type}">📖 Compare databases and their tradeoffs</button>` : '')
           : `<h2>What it is</h2><p class="d-about">${info.about}</p>`
       }
+      ${tradeHTML(node)}
       <h2>Right now</h2>
       <div class="d-status" id="d-status"></div>
       <h2>Hardware</h2>
@@ -645,6 +658,7 @@ export class UI {
           <div class="m-bar"><i></i></div>
           <div class="m-raw"></div>
           ${NOTES[node.type + '.' + k] ? `<div class="m-note">${NOTES[node.type + '.' + k]}</div>` : ''}
+          ${k === 'cpu' ? chipNote(node) : ''}
         </div>`
       ).join('')}
       <h2>Live metrics</h2>
@@ -750,7 +764,7 @@ export class UI {
       case 'trino':
         return [['Queries', `${n.outRate.toFixed(1)} of ${(n.cap || 0).toFixed(1)} /s`], ['CPU per query', `${n.cost.toFixed(1)} core-seconds`], ['Query latency', n.latency ? fmtDur(n.latency) : '—'], ['Queries waiting', `${Math.round(n.queue)} of 40`], ['Files opened per query', Math.round(24 + this.sim.nodes.lake.smallFiles * 0.2)], ['Rejected queries', `${n.dropRate.toFixed(1)} /s`], ['Crash risk', pct(n.stress)]];
       case 'bi':
-        return [['Queries sent', `${n.outRate.toFixed(1)} /s`], [`Real-time (${this.sim.nodes.clickhouse.label})`, fmtDur(n.chLatency)], ['Ad-hoc (Trino)', fmtDur(n.trLatency)], [`${this.sim.nodes.clickhouse.label} data is behind by`, fmtDur(n.freshCH)], ['Lake data is behind by', fmtDur(n.freshLake)], ['Failing queries', `${n.failRate.toFixed(1)} /s`]];
+        return [['Queries sent', `${n.outRate.toFixed(1)} /s`], [`Real-time (${this.sim.nodes.clickhouse.tech.name})`, fmtDur(n.chLatency)], ['Ad-hoc (Trino)', fmtDur(n.trLatency)], [`${this.sim.nodes.clickhouse.label} data is behind by`, fmtDur(n.freshCH)], ['Lake data is behind by', fmtDur(n.freshLake)], ['Failing queries', `${n.failRate.toFixed(1)} /s`]];
       case 'cdn': {
         const A = this.sim.assets;
         const all = A.edgeBytes + A.originBytes + (this.sim.nodes.lb._apiBps || 0) / 8;

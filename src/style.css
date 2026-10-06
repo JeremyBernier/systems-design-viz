@@ -799,8 +799,7 @@ select {
   border-radius: 6px;
   padding: 3px 6px;
 }
-#planner,
-#dbguide {
+.dlg {
   width: min(940px, calc(100vw - 32px));
   max-height: min(820px, calc(100vh - 32px));
   padding: 0;
@@ -810,22 +809,18 @@ select {
   border-radius: 10px;
   overflow: hidden;
 }
-#planner[open],
-#dbguide[open] {
+.dlg[open] {
   display: flex;
   flex-direction: column;
 }
-#planner::backdrop,
-#dbguide::backdrop {
+.dlg::backdrop {
   background: rgb(0 0 0 / 0.6);
 }
-#planner h3,
-#dbguide h3 {
+.dlg h3 {
   margin: 0;
   font-size: 15px;
 }
-#planner h2,
-#dbguide h2 {
+.dlg h2 {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -833,8 +828,7 @@ select {
   color: var(--muted);
   margin: 16px 0 6px;
 }
-#planner h2:first-child,
-#dbguide h2:first-child {
+.dlg h2:first-child {
   margin-top: 0;
 }
 .pl-head,
@@ -1027,7 +1021,7 @@ button.primary {
   border-color: #fff;
 }
 
-/* ---------- database guide dialog (dbguide.js); the frame is shared with #planner ---------- */
+/* ---------- database guide dialog (dbguide.js); .dlg is the frame every dialog shares ---------- */
 #dbguide {
   width: min(1080px, calc(100vw - 32px));
 }
@@ -1135,4 +1129,90 @@ button.primary {
 }
 .dg-q[open] summary {
   margin-bottom: 8px;
+}
+
+/* ---------- numbers to know (numbers.js) ---------- */
+.dlg a {
+  color: var(--accent);
+}
+.nm-lat {
+  max-width: 78ch;
+}
+.nm-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 12px;
+  margin: 10px 0;
+  color: var(--text-2);
+}
+.nm-row b {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.nm-row i {
+  grid-column: 1 / -1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--accent);
+}
+.nm-row small {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+}
+.nm-quiz,
+.nm-done {
+  max-width: 68ch;
+  margin: 0 auto;
+}
+.nm-q {
+  margin: 10px 0 14px;
+  font-size: 15px;
+  line-height: 1.45;
+  color: var(--text);
+}
+.nm-choices {
+  display: grid;
+  gap: 8px;
+}
+.nm-choices button {
+  padding: 9px 12px;
+  text-align: left;
+  font-variant-numeric: tabular-nums;
+}
+.nm-choices button:disabled {
+  opacity: 1;
+  cursor: default;
+  color: var(--text-2);
+}
+.nm-choices button[data-mark='right'] {
+  color: var(--text);
+  border-color: var(--good);
+  background: rgb(12 163 12 / 0.18);
+}
+.nm-choices button[data-mark='wrong'] {
+  color: var(--text);
+  border-color: var(--critical);
+  background: rgb(208 59 59 / 0.18);
+}
+.nm-why {
+  margin: 14px 0 4px;
+  padding: 9px 12px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border-left: 3px solid var(--critical);
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.nm-why[data-ok='true'] {
+  border-left-color: var(--good);
+}
+.nm-why b {
+  color: var(--text);
+}
+.nm-score {
+  margin: 4px 0 8px;
+  font-size: 34px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }

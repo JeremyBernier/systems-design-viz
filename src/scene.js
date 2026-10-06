@@ -1395,15 +1395,13 @@ export class Scene {
       else if (n.type === 'worker') stat = `${fmtRate(n.outRate)} jobs/s`;
       else if (n.type === 'consumer') stat = `${fmtRate(n.outRate)} msg/s`;
       else stat = `${fmtRate(n.type === 'client' ? n.outRate : n.inRate)} req/s`;
-      // line 1: logo + technology; line 2: the role it plays
+      // line 1: logo + the job it does in this system; line 2: the technology doing it
       const tech = n.tech;
       const sig = (tech ? tech.name : '') + n.label;
       if (v.techSig !== sig) {
         v.techSig = sig;
-        const isDb = n.type === 'db' || n.type === 'clickhouse';
-        // web servers share one technology, so their number is the useful part
-        v.elName.innerHTML = !tech ? n.label : logoSVG(tech.logo, 14) + (n.type === 'web' ? n.label : tech.name);
-        v.elRole.textContent = !tech ? '' : n.type === 'web' ? tech.name : isDb ? NODE_INFO[n.type].title : n.label;
+        v.elName.innerHTML = !tech ? n.label : logoSVG(tech.logo, 14) + n.label;
+        v.elRole.textContent = !tech || tech.name === n.label ? '' : tech.name;
         v.decal.visible = !!tech;
         if (tech) {
           if (v.decal.material.map) v.decal.material.map.dispose();

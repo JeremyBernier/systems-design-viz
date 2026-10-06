@@ -1,6 +1,12 @@
 # System Design Simulator
 
+**Live demo: [systems-design-viz.pages.dev](https://systems-design-viz.pages.dev/)**
+
 Made by Jeremy Bernier: [X](https://x.com/jeremybernier) · [jbernier.com](https://jbernier.com) · [LinkedIn](https://www.linkedin.com/in/jeremysbernier/)
+
+[![System Design Simulator running the YouTube preset](docs/screenshot.png)](https://systems-design-viz.pages.dev/)
+
+> **This is a concept, not a reference.** It was vibe coded with [Claude](https://claude.com/claude-code), and it is by no means accurate: the capacities, latencies, prices and failure behaviour are rough approximations that have not been checked against real systems. Treat it as a toy for building intuition, and don't size or cost a real system from it.
 
 Interactive 3D visualization of a small web service under load: clients → load balancer → web servers → cache / database, plus a job queue with workers, and an analytics side fed by Kafka: a lake writer committing Parquet files to an S3 + Iceberg data lake, ClickHouse for real-time queries, Trino for SQL on the lake, and dashboards querying both.
 

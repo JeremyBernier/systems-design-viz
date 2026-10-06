@@ -2,7 +2,6 @@ import './dbguide.css';
 import { TECH, logoSVG } from './tech.js';
 import { ENGINE_WHY } from './tradeoffs.js';
 import { AT_A_GLANCE, GLANCE_COLUMNS, MECHANICS } from './dbconcepts.js';
-import { stageBar } from './buildui.js';
 import { fmtUSD } from './cost.js';
 import { fmtDur } from './sim.js';
 
@@ -231,7 +230,7 @@ export function initDbGuide(ui, sim) {
   dlg.id = 'dbguide';
   dlg.className = 'dlg';
   dlg.innerHTML = `
-    <form method="dialog" class="pl-head"><div><h3>Databases and their tradeoffs</h3><p class="hint">No database is best at everything. Each one buys something — scale, speed, flexibility, safety, less work — by giving something else up.</p></div><button aria-label="Close">✕</button></form>
+    <form method="dialog" class="pl-head"><div><h3><span class="learn-tag">Learn</span>Databases and their tradeoffs</h3><p class="hint">No database is best at everything. Each one buys something — scale, speed, flexibility, safety, less work — by giving something else up.</p></div><button aria-label="Close">✕</button></form>
     <div class="seg dg-tabs" role="group" aria-label="Guide section">${TABS.map(([k, t]) => `<button data-tab="${k}">${t}</button>`).join('')}</div>
     <div class="dg-body" id="dg-body"></div>`;
   document.body.append(dlg);
@@ -343,12 +342,18 @@ export function initDbGuide(ui, sim) {
   // Esc closes the dialog natively; keep it from also reaching the app's own Esc handler
   dlg.addEventListener('keydown', (e) => e.key === 'Escape' && e.stopPropagation());
 
-  // a way in that is always on screen: a button beside Build
+  // a way in that is always on screen. Learning is separate from building, so it sits with the other
+  // guides in the Learn row at the bottom left of the diagram.
   const open = document.createElement('button');
   open.id = 'dbguide-open';
-  open.textContent = '📚 Databases';
-  open.title = 'How databases differ, and how they work';
-  stageBar().append(open);
+  open.textContent = '📖 Databases';
+  open.title = 'A guide to read: how databases differ and how they work. It does not change your system.';
+  const bar = $('learnbar'); // the Learn row at the bottom left of the diagram (index.html)
+  bar.insertBefore(open, bar.querySelector('button'));
+  const dock = () => (bar.style.left = $('controls').getBoundingClientRect().right + 12 + 'px');
+  new ResizeObserver(dock).observe($('controls'));
+  addEventListener('resize', dock);
+  dock();
   open.addEventListener('click', () => {
     type = 'db';
     render();

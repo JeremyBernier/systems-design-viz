@@ -69,3 +69,47 @@
   text-transform: uppercase;
   color: var(--muted);
 }
+
+/* Learn: the row of guides at the bottom left of the diagram, just right of the sidebar. They are
+   for reading, not building, so they get their own colour and a "Learn" tag. */
+#learnbar {
+  position: fixed;
+  bottom: 16px;
+  left: 344px; /* set from the sidebar's edge in dbguide.js */
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: rgb(26 26 25 / 0.92);
+  border: 1px solid #9085e9;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgb(0 0 0 / 0.45);
+}
+#learnbar button {
+  padding: 5px 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+#learnbar button:hover {
+  border-color: #9085e9;
+  background: rgb(144 133 233 / 0.18);
+}
+.learn-tag {
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #0d0d0d;
+  background: #9085e9;
+  border-radius: 4px;
+}
+h3 .learn-tag {
+  margin-right: 8px;
+  vertical-align: 2px;
+}
+/* the bottleneck banner shares the bottom edge: lift it clear of the Learn row */
+#banner {
+  bottom: 68px;
+}

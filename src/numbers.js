@@ -184,7 +184,7 @@ export function initNumbers(sim) {
   dlg.id = 'numbers';
   dlg.className = 'dlg';
   dlg.innerHTML = `
-    <form method="dialog" class="pl-head"><div><h3>Numbers to know</h3><p class="hint">Estimating a system means multiplying a few remembered figures. They only need to be right to the nearest power of ten.</p></div><button aria-label="Close">✕</button></form>
+    <form method="dialog" class="pl-head"><div><h3><span class="learn-tag">Learn</span>Numbers to know</h3><p class="hint">Estimating a system means multiplying a few remembered figures. They only need to be right to the nearest power of ten.</p></div><button aria-label="Close">✕</button></form>
     <div class="seg dg-tabs" role="group" aria-label="Section"><button data-tab="learn">The numbers</button><button data-tab="quiz">Quiz</button></div>
     <div class="dg-body" id="nm-body"></div>`;
   document.body.append(dlg);

@@ -1,6 +1,7 @@
 import { TECH, DEFAULT_TECH } from './tech.js';
 import { DATA_DEFAULTS, CACHE_NODE_CAP, partialLoss, heal, cacheCluster, cacheStatus, dbCluster, dbStatus } from './datatier.js';
 import { ASSET_DEFAULTS, newAssetStats, assetTraffic, addAssetLoad } from './cdn.js';
+import { fnJobCapacity, functions } from './functions.js';
 import { initReliability, reliability, recordReliability } from './latency.js';
 import { AUTO_PARAMS, trafficShape, scaleWeb, scaleWorkers } from './autoscale.js';
 
@@ -32,6 +33,8 @@ export const EDGE_TYPES = [
   ['client', 'cdn'],
   ['cdn', 'blob'],
   ['web', 'blob'], // uploads, and asset reads when there is no CDN
+  ['blob', 'fn'], // an upload event invokes a function
+  ['queue', 'fn'], // functions polling the queue, alongside the workers
 ];
 export const HISTORY = 240; // samples kept per metric (4 per second → 60s)
 
@@ -70,6 +73,9 @@ export const NIC_BPS = { client: 10e9, lb: 10e9, web: 1e9, cache: 1e9, db: 1e9, 
 // Managed services have no card of yours; these are the slice of the provider's network a system this size could draw on.
 NIC_BPS.cdn = 400e9;
 NIC_BPS.blob = 100e9;
+NIC_BPS.fn = 10e9;
+// Connections that are possible but not made until the user asks: functions on the queue would hide what the workers teach.
+const OPTIONAL_EDGES = new Set(['queue>fn']);
 
 // Hardware fitted to each machine. Workers are a pool: totals scale with the worker count.
 export const SPECS = {
@@ -88,6 +94,7 @@ export const SPECS = {
   bi: { cores: 4, ramGB: 8, diskGB: 100 },
   cdn: { cores: 0, ramGB: 0, diskGB: 0 }, // the provider's edge network
   blob: { cores: 0, ramGB: 0, diskGB: 0 }, // managed object storage
+  fn: { cores: 0, ramGB: 0, diskGB: 0 }, // serverless: no machine of yours
 };
 
 export function fmtGB(gb) {
@@ -206,6 +213,13 @@ export const NODE_INFO = {
   },
 };
 
+NODE_INFO.fn = {
+  title: 'Functions',
+  kind: 'Event-driven serverless functions',
+  about:
+    'Small pieces of code the cloud runs in response to events, with no server of yours. Here an upload landing in object storage triggers one (resize the photo, start a transcode), and it can also be connected to the job queue to take jobs alongside the workers. Capacity is counted in concurrent executions, the first event after a quiet spell pays a cold start, and you are billed per invocation and per second of run time.',
+};
+
 function makeNode(id, type, extra = {}) {
   return {
     id,
@@ -290,11 +304,12 @@ export class Sim {
     n.cdn = makeNode('cdn', 'cdn', { warm: 1, hitRatio: 0, hit: 0, missRate: 0, edgeBytes: 0, storedGB: 0 });
     n.blob = makeNode('blob', 'blob', { objects, storedGB: (objects * this.params.assetKB) / 1e6, putRate: 0, getRate: 0 });
     this.assets = newAssetStats();
+    n.fn = makeNode('fn', 'fn', { warm: 0, concurrency: 0, coldPct: 0, upRate: 0, jobRate: 0, limit: 0 });
     this.nodes = n;
     for (const type in this.params.tech) this.setTech(type, this.params.tech[type], true);
     // every sensible connection starts wired up
     this.edges = new Set();
-    for (const id in n) for (const e of this.possibleEdges(id)) this.edges.add(e.id);
+    for (const id in n) for (const e of this.possibleEdges(id)) if (!OPTIONAL_EDGES.has(e.id)) this.edges.add(e.id);
     this.time = 0;
     this.spike = 0;
     this.flows = {}; // link id → rate, read by the renderer
@@ -328,7 +343,7 @@ export class Sim {
       Object.assign(node, { tech: t, kind: t.kind, about: t.about, spec: t.spec || null, serverless: !!t.serverless, managedDisk: !!t.managedDisk, restartSecs: t.restart || 8 });
       node.queue = node.stress = 0;
       // databases are known by their product name
-      if (type === 'db' || type === 'clickhouse') node.label = t.name;
+      if (type === 'db' || type === 'clickhouse' || type === 'fn') node.label = t.name;
       if (type === 'db') node.diskUsed = 0.35;
       if (type === 'clickhouse') Object.assign(node, { parts: t.parts ? 20 : 0, tooManyParts: false });
     }
@@ -370,7 +385,7 @@ export class Sim {
     node.down = false;
     node.queue = node.stress = node.outRate = node.inRate = node.dropRate = node.util = 0;
     if (node.type === 'cache') node.warm = 0;
-    if (on) for (const e of this.possibleEdges(id)) wired ? this.edges.add(e.id) : this.edges.delete(e.id);
+    if (on) for (const e of this.possibleEdges(id)) wired && !OPTIONAL_EDGES.has(e.id) ? this.edges.add(e.id) : this.edges.delete(e.id);
     this.emit('log', on ? 'good' : 'warn', `${node.label} ${on ? 'added' : 'removed'}`);
   }
 
@@ -983,12 +998,17 @@ export class Sim {
     worker.cap = p.workerCount * WORKER_RATE;
     const jobsIn = jobsArr;
     const workCap = off(worker) || !E.has('queue>worker') ? 0 : p.workerCount * WORKER_RATE;
+    // functions wired to the queue poll it too; one job holds one execution environment as long as it holds a worker core
+    const JOB_SECS = WORKER_RATE > 0 ? SPECS.worker.cores / WORKER_RATE : 0.03;
+    const fnCap = fnJobCapacity(this, dt, JOB_SECS);
+    let fnJobs = 0;
     queue.inRate = jobsArr;
     let jobsDone = 0;
     let jobsDropped = off(queue) ? queue.inRate : 0;
     if (!off(queue)) {
       queue.queue += jobsIn * dt;
-      jobsDone = Math.min(queue.queue / dt, workCap);
+      jobsDone = Math.min(queue.queue / dt, workCap + fnCap);
+      fnJobs = Math.max(0, jobsDone - workCap); // the machines are already paid for, so they take jobs first
       queue.queue -= jobsDone * dt;
       if (queue.queue > Q_MAX) {
         jobsDropped = (queue.queue - Q_MAX) / dt;
@@ -999,7 +1019,7 @@ export class Sim {
       queue.mem = clamp(0.1 + 0.88 * queue.util);
       queue.disk = clamp(0.1 + 0.5 * queue.util);
       queue.bps = (jobsIn + jobsDone) * 4e3 * 8;
-      queue.latency = workCap > 0 ? queue.queue / workCap : Infinity;
+      queue.latency = workCap + fnCap > 0 ? queue.queue / (workCap + fnCap) : Infinity;
       queue.status =
         queue.util >= 0.99
           ? 'Queue is full. New jobs are rejected and lost.'
@@ -1011,10 +1031,18 @@ export class Sim {
       queue.status = 'Down. Background jobs are being lost.';
     }
     queue.outRate = jobsDone;
+    // broker's view of its consumers: who is subscribed, and jobs handed out but not yet acknowledged
+    // Each worker machine runs one consumer process per core, all subscribed to the same queue.
+    const PER_WORKER = SPECS.worker.cores;
+    queue.machines = workCap > 0 ? p.workerCount : 0;
+    queue.consumers = queue.machines * PER_WORKER;
+    queue.inflight = off(queue) || !WORKER_RATE ? 0 : ((jobsDone - fnJobs) / WORKER_RATE) * PER_WORKER;
+    queue.fnJobs = fnJobs;
+    functions(this, dt, fnJobs, JOB_SECS, ease);
     queue.dropRate = ease(queue.dropRate, jobsDropped, dt, 0.2);
-    worker.inRate = worker.outRate = jobsDone;
+    worker.inRate = worker.outRate = jobsDone - fnJobs;
     worker.util = workCap > 0 ? jobsIn / workCap : 0;
-    worker.cpu = ease(worker.cpu, workCap > 0 ? clamp(0.03 + (jobsDone / workCap) * 0.97) : 0, dt);
+    worker.cpu = ease(worker.cpu, workCap > 0 ? clamp(0.03 + ((jobsDone - fnJobs) / workCap) * 0.97) : 0, dt);
     worker.mem = off(worker) ? 0 : 0.35 + 0.2 * worker.cpu;
     worker.disk = 0.15;
     worker.bps = jobsDone * 50e3 * 8;
@@ -1079,7 +1107,9 @@ export class Sim {
     f['bi>clickhouse<'] = chServed;
     f['bi>trino<'] = trServed;
     f['trino>lake<'] = lake.getRate;
-    f['queue>worker'] = jobsDone;
+    f['queue>worker'] = jobsDone - fnJobs;
+    f['queue>fn'] = fnJobs;
+    f['blob>fn'] = N.fn.upRate;
 
     this._findBottleneck();
 

@@ -499,10 +499,27 @@ export const TECH = {
   },
 };
 
+// ------------------------------------------------------------------ event-driven functions
+// limit: concurrent executions the platform allows · billed per invocation and per second of run time (1 GB)
+TECH.fn = {
+  lambda: {
+    name: 'AWS Lambda', vendor: 'AWS', logo: badge('λ', AWS), kind: 'Event-driven functions', serverless: true,
+    about: 'AWS runs your function once per event — an S3 upload, a queue message, a schedule — in an execution environment it creates on demand and keeps warm for a few minutes. There is nothing to patch or scale, and nothing to pay when idle. The limits that matter are concurrent executions (1,000 per account by default), the cold start when a new environment is needed, and the 15-minute cap on one run.',
+    limit: 1000, cost: (n) => perMillion(n.outRate, 0.2) + n.concurrency * SECONDS * 0.0000166667,
+    basis: '$0.20 per million invocations + $0.0000167 per GB-second (1 GB functions)',
+  },
+  cloudfunctions: {
+    name: 'Cloud Run functions', vendor: 'Google Cloud', logo: icon(siGooglecloud), kind: 'Event-driven functions', serverless: true,
+    about: 'Google Cloud\'s counterpart to Lambda (formerly Cloud Functions): code run per event from Cloud Storage, Pub/Sub or HTTP, on Cloud Run underneath. Each function scales to a maximum number of instances — 100 unless you raise it — so a burst is throttled far sooner than on Lambda\'s default.',
+    limit: 100, cost: (n) => perMillion(n.outRate, 0.4) + n.concurrency * SECONDS * 0.0000265,
+    basis: '$0.40 per million invocations + ~$0.0000265 per second of 1 vCPU + 1 GB',
+  },
+};
+
 export const DEFAULT_TECH = {
   lb: 'nginx', web: 'ec2', cache: 'redis', db: 'postgres', queue: 'rabbitmq', worker: 'ec2',
   kafka: 'kafka', consumer: 'flink', lake: 's3iceberg', clickhouse: 'clickhouse', trino: 'trino', bi: 'grafana',
-  cdn: 'cloudfront', blob: 's3',
+  cdn: 'cloudfront', blob: 's3', fn: 'lambda',
 };
 
 export { HOURS, SECONDS, GB };

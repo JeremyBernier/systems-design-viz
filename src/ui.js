@@ -2,7 +2,7 @@ import { NODE_INFO, HISTORY, fmtRate, fmtDur, fmtBits, fmtBytes, fmtGB, rawMetri
 import { TECH, logoSVG } from './tech.js';
 import { PRESETS } from './presets.js';
 import { costs, nodeCost, fmtUSD } from './cost.js';
-import { loadLevel } from './scene.js';
+import { loadLevel, APP_VIEW } from './scene.js';
 import { initModelUI, pricingHTML, syncPricing } from './modelui.js';
 import { DATA_STEP, MAX_REPLICAS, SHARD_STEPS, MAX_CACHE_NODES, CACHE_NODE_CAP } from './datatier.js';
 import { fmtTTL } from './cdn.js';
@@ -43,6 +43,8 @@ const NOTES = {
   'cdn.net': 'Delivered to users from the edge + cache misses pulled from the origin',
   'blob.disk': 'Grows with every upload; you pay per GB-month',
   'blob.net': 'CDN cache misses and uploads (or every asset read when there is no CDN)',
+  'fn.cpu': 'Share of the concurrency limit in use',
+  'fn.net': 'Objects read from the bucket and results written back',
 };
 
 const TIPS = [
@@ -60,6 +62,7 @@ const TIPS = [
   ['Starve ingestion', 'Push dashboard queries past ~100/s. ClickHouse spends its CPU on queries, inserts fall behind and dashboards go stale.'],
   ['Replicas are for reads', 'Remove the cache, set writes to 2% and run 6 web servers at 6,000 req/s: the database drowns in reads. Add 2 read replicas and it recovers. Now raise writes to 40%: every write still goes through the one primary, replicas stop helping and fall behind. Only shards raise the write ceiling — and 4 shards give about 3×, not 4×.'],
   ['Failover, and losing one node of many', 'Give the database a read replica and kill it: writes fail for about 30 s while the replica is promoted, but reads keep flowing. Compare with no replica. Then give the cache 3 nodes and kill it: one node dies and only a third of the keys go cold.'],
+  ['Functions on the queue', 'Click Connect components, then the job queue and the functions component. Lambda now polls the queue next to the worker machines: a backlog that took minutes to drain is gone in seconds, with no machines to add — and a per-invocation line appears on the bill. Zoom into it to watch environments cold-start, stay warm, then get reclaimed.'],
   ['Remove the CDN', 'Pick the Instagram or YouTube system, click the CDN and remove it. Every photo and video now squeezes through the web servers: their network cards saturate at 1 Gbps while the CPU sits idle, most asset requests fail, and "Data transfer out" takes the CDN\'s place on the bill.'],
   ['Cold edge', 'Kill the CDN and let it restart, or drag the CDN cache TTL down to a few seconds. Misses pour into object storage until the edge is warm again; switch the CDN to Cloudflare or Fastly and each of those bytes is also billed as origin egress.'],
   ['Retry storm', 'At ~800 req/s set client retries to Naive and hit Traffic spike. Offered load jumps to 4× the real traffic and stays there after the spike has passed, until the servers run out of memory. Repeat with Backoff + budget: the same spike is over in seconds.'],
@@ -157,7 +160,9 @@ class Chart {
 
 // ---------------------------------------------------------------- UI
 export class UI {
-  constructor(sim, { onSelect, onPause, onReset, onStartPlace, onConnectMode, onPreset }) {
+  constructor(sim, { onSelect, onPause, onReset, onStartPlace, onConnectMode, onPreset, onView }) {
+    this.onView = onView;
+    this.view = 'app'; // zoomed-in view: the application's internals where there is one, else the hardware
     this.onStartPlace = onStartPlace;
     this.onConnectMode = onConnectMode;
     this.mode = null; // null | 'place' | 'connect'
@@ -589,6 +594,7 @@ export class UI {
         <div class="d-title">${node.tech ? logoSVG(node.tech.logo, 34) : ''}<div><h3>${node.label}</h3><div class="d-kind">${node.tech && node.tech.name !== node.label ? node.tech.name + ' · ' : ''}${node.kind || info.kind}</div></div></div>
         <span class="badge" id="d-badge"></span>
       </div>
+      ${APP_VIEW[node.type] ? `<div class="seg" id="d-view" role="group" aria-label="Zoomed-in view"><button data-view="app">${APP_VIEW[node.type]} internals</button><button data-view="hw">Hardware</button></div>` : ''}
       ${
         TECH[node.type]
           ? `<label class="engine">Technology<select id="d-engine">${Object.entries(TECH[node.type])
@@ -630,6 +636,17 @@ export class UI {
         this.select(id);
       });
     $('d-back').addEventListener('click', () => this.onSelect(null));
+    const seg = $('d-view');
+    if (seg) {
+      const mark = () => seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.view === this.view));
+      seg.addEventListener('click', (e) => {
+        if (!e.target.dataset.view) return;
+        this.view = e.target.dataset.view;
+        this.onView(this.view);
+        mark();
+      });
+      mark();
+    }
     this.meters = RESOURCES.map(([k, name]) => {
       const m = el.querySelector(`[data-res="${k}"]`);
       const chart = new Chart(m.querySelector('canvas'), {
@@ -690,8 +707,10 @@ export class UI {
         return [['Produced', `${fmtRate(n.inRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Consumed (2 groups)', r(n.outRate, 'msg/s')], ['Lag: lake writer', `${fmtRate(n.lag)} of ${fmtRate(n.retention || 0)} retained`], [`Lag: ${this.sim.nodes.clickhouse.label}`, `${fmtRate(n.lagCH)} of ${fmtRate(n.retention || 0)} retained`], ['Lag per partition', n.partitions.map((v) => fmtRate(v)).join(' · ')], ['Expired unread', r(n.expiredRate, 'msg/s')]];
       case 'consumer':
         return [['Reading from Kafka', `${fmtRate(n.outRate)} of ${fmtRate(n.cap || 0)} msg/s`], ['Raw events in', fmtBytes(n.outRate * p.eventBytes)], ['Behind by', `${fmtRate(this.sim.nodes.kafka.lag)} msgs`], ['Parquet out → data lake', fmtBytes(this.sim.nodes.lake.ingestBytes)], ['Small files written', `${this.sim.techOf('consumer').files} per second`]];
+      case 'fn':
+        return [['Invocations', r(n.outRate, '/s')], ['From upload events', `${n.upRate.toFixed(1)} /s`], ['From the job queue', this.sim.edges.has('queue>fn') ? r(n.jobRate, 'jobs/s') : 'not connected'], ['Concurrent executions', `${n.concurrency.toFixed(1)} of ${n.limit.toLocaleString()}`], ['Warm environments', n.warm.toFixed(1)], ['Cold starts', pct(n.coldPct)], ['Average duration', fmtDur(n.latency)], ['Throttled', r(n.dropRate, '/s')]];
       case 'queue':
-        return [['Enqueued', r(n.inRate, 'jobs/s')], ['Dequeued', r(n.outRate, 'jobs/s')], ['Jobs in queue', `${Math.round(n.queue).toLocaleString()} of ${(n.qmax || 0).toLocaleString()}`], ['Wait for a new job', fmtDur(n.latency || 0)], ['Rejected', r(n.dropRate, 'jobs/s')]];
+        return [['Enqueued', r(n.inRate, 'jobs/s')], ['Dequeued', r(n.outRate, 'jobs/s')], ['Jobs in queue', `${Math.round(n.queue).toLocaleString()} of ${(n.qmax || 0).toLocaleString()}`], ['Consumers', n.consumers ? `${n.consumers} processes on ${n.machines} worker machine${n.machines > 1 ? 's' : ''}` : 'none — nothing is draining it'], ['Delivered, not yet acknowledged', (n.inflight || 0).toFixed(1)], ['Wait for a new job', fmtDur(n.latency || 0)], ['Rejected', r(n.dropRate, 'jobs/s')]];
       case 'lake':
         return [['Data stored', fmtGB(n.storedGB)], ['Parquet files', n.files.toLocaleString()], ['Small files awaiting compaction', Math.round(n.smallFiles).toLocaleString()], ['Ingest (compressed)', fmtBytes(n.ingestBytes)], ['Compression vs raw JSON', '6×'], ['S3 PUT requests', `${n.putRate.toFixed(1)} /s`], ['S3 GET requests', `${fmtRate(n.getRate)} /s`], ['Iceberg snapshots', Math.round(n.snapshots).toLocaleString()], ['Compaction', p.compaction ? 'on' : 'off']];
       case 'clickhouse':

@@ -33,7 +33,7 @@ export const PRESETS = {
     params: { traffic: 300, writePct: 15, workerCount: 1, queryRate: 0, ...ASSETS.simple },
     webs: 2,
     tech: {},
-    remove: ['kafka', 'consumer', 'lake', 'clickhouse', 'trino', 'bi'],
+    remove: ['kafka', 'consumer', 'lake', 'clickhouse', 'trino', 'bi', 'fn'],
   },
   youtube: {
     name: 'YouTube',
@@ -42,7 +42,7 @@ export const PRESETS = {
     params: { traffic: 4000, writePct: 1, workerCount: 6, queryRate: 20, ...ASSETS.youtube },
     data: { cacheNodes: 3 }, // popular-video metadata is served from a cache cluster; Cassandra scales itself
     webs: 5,
-    tech: { lb: 'gclb', web: 'gke', cache: 'redis', db: 'cassandra', queue: 'pubsub', worker: 'gce', kafka: 'kafka', consumer: 'dataflow', lake: 'gcsiceberg', clickhouse: 'bigquery', trino: 'trino', bi: 'looker', cdn: 'cloudcdn', blob: 'gcs' },
+    tech: { lb: 'gclb', web: 'gke', cache: 'redis', db: 'cassandra', queue: 'pubsub', worker: 'gce', kafka: 'kafka', consumer: 'dataflow', lake: 'gcsiceberg', clickhouse: 'bigquery', trino: 'trino', bi: 'looker', cdn: 'cloudcdn', blob: 'gcs', fn: 'cloudfunctions' },
     remove: [],
   },
   instagram: {

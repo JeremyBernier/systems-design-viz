@@ -136,6 +136,9 @@ p {
 .rig-label b {
   font-variant-numeric: tabular-nums;
 }
+.rig-label.bad {
+  border-color: var(--critical);
+}
 
 /* ---------- HUD ---------- */
 #hud {
@@ -941,4 +944,27 @@ select {
 }
 #rel-stats {
   font-size: 12px;
+}
+
+/* ---------- zoomed-in view switch: application internals / hardware ---------- */
+.seg {
+  display: flex;
+  margin-top: 10px;
+}
+.seg button {
+  flex: 1;
+  border-radius: 0;
+  color: var(--text-2);
+}
+.seg button:first-child {
+  border-radius: 6px 0 0 6px;
+}
+.seg button:last-child {
+  border-radius: 0 6px 6px 0;
+  margin-left: -1px;
+}
+.seg button[aria-pressed='true'] {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgb(57 135 229 / 0.2);
 }

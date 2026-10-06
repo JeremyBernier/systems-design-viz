@@ -28,6 +28,32 @@ export function loadLevel(util, down) {
 const HEIGHT = { client: 2.2, lb: 1.2, web: 2.3, cache: 1.2, db: 2.1, kafka: 1.5, consumer: 1.6, queue: 1.1, worker: 1.4, lake: 1.6, clickhouse: 2.1, trino: 1.9, bi: 2.0 };
 HEIGHT.cdn = 1.3;
 HEIGHT.blob = 1.4;
+HEIGHT.fn = 1.1;
+// What each queue technology calls the same moving parts (used by the zoomed-in broker view).
+const QUEUE_TERMS = {
+  rabbitmq: { entry: 'Exchange', queue: 'Queue', ready: 'ready', flight: 'Unacked', done: 'acks' },
+  redisq: { entry: null, queue: 'Redis list', ready: 'enqueued', flight: 'Busy', done: 'done' },
+  sqs: { entry: null, queue: 'Queue', ready: 'visible', flight: 'In flight', done: 'deletes' },
+  pubsub: { entry: 'Topic', queue: 'Subscription', ready: 'undelivered', flight: 'Outstanding', done: 'acks' },
+};
+const Q_SLOTS = 32; // message blocks the queue lane can show
+// Components with an application view: what the software is doing, as an alternative to the hardware rig.
+export const APP_VIEW = { queue: 'Queue', db: 'Database', fn: 'Function' };
+const FN_TILES = 40; // execution environments the function view can show
+// What each database engine calls its moving parts (used by the zoomed-in database view).
+const BTREE = { table: 'Tables (heap)', index: 'B-tree indexes', log: 'WAL', pool: 'Shared buffers' };
+const LSM = { table: 'Tables (SSTables)', index: 'Partition indexes', log: 'Commit log', pool: 'Memtables + cache' };
+const DB_TERMS = {
+  postgres: BTREE,
+  rds: BTREE,
+  cloudsql: BTREE,
+  aurora: { ...BTREE, log: 'Redo log (shared storage)', pool: 'Buffer cache' },
+  mysql: { table: 'Tables (clustered)', index: 'B+tree indexes', log: 'Redo log', pool: 'Buffer pool' },
+  spanner: { table: 'Table splits', index: 'Indexes', log: 'Paxos log', pool: 'Block cache' },
+  cassandra: LSM,
+  bigtable: { ...LSM, table: 'Tablets (SSTables)', index: 'Row-key index' },
+  dynamodb: { table: 'Table partitions', index: 'Key + secondary indexes', log: 'Replication log', pool: 'Storage-node cache' },
+};
 const OVERVIEW = { pos: new THREE.Vector3(6.5, 36, 27), target: new THREE.Vector3(6.5, 0, 4) };
 const SIDE_PANELS = 620; // px of the window covered by the two side panels
 
@@ -96,6 +122,11 @@ export class Scene {
     this._buildLinks();
     this._buildParticles();
     this._buildRig();
+    this.view = 'app'; // 'app' = application view where one exists, 'hw' = hardware rig
+    this.appRigs = {};
+    this._buildQueueRig();
+    this._buildDbRig();
+    this._buildFnRig();
     this._bindPointer();
 
     // build-mode helpers: a ghost pad while placing, a rubber band while connecting
@@ -135,6 +166,7 @@ export class Scene {
       bi: [16, 16.5],
       cdn: [-10, -7.5],
       blob: [-5.5, -13.5],
+      fn: [10, -12.5],
     };
     for (const id in this.sim.nodes) {
       const type = this.sim.nodes[id].type;
@@ -220,6 +252,15 @@ export class Scene {
         // a six-sided bucket of objects (the data lake's bucket is round)
         add(new THREE.CylinderGeometry(1.1, 0.8, 1.0, 6), shell(), 0, 0.6, 0);
         add(new THREE.CylinderGeometry(0.95, 0.95, 0.05, 6), glow(), 0, 1.12, 0);
+      } else if (type === 'fn') {
+        // a tray of small identical execution environments
+        add(new THREE.BoxGeometry(2.2, 0.2, 1.6), shell(), 0, 0.2, 0);
+        for (let i = 0; i < 12; i++) {
+          const x = ((i % 4) - 1.5) * 0.5;
+          const z = (Math.floor(i / 4) - 1) * 0.46;
+          add(new THREE.BoxGeometry(0.34, 0.34, 0.34), shell(), x, 0.47, z);
+          add(new THREE.BoxGeometry(0.26, 0.04, 0.26), glow(), x, 0.66, z);
+        }
       } else if (type === 'kafka') {
         // three partition logs; the bright bar is unread backlog (lag)
         v.bars = [];
@@ -354,6 +395,8 @@ export class Scene {
     add('trino', 'lake', FLOW.query);
     add('client', 'cdn', FLOW.asset);
     add('cdn', 'blob', FLOW.asset);
+    add('blob', 'fn', FLOW.job);
+    add('queue', 'fn', FLOW.job);
   }
 
   // ------------------------------------------------------------ particles
@@ -471,6 +514,396 @@ export class Scene {
       this.labelLayer.appendChild(el);
       this.rigLabels[key] = el;
     }
+  }
+
+  // ------------------------------------------------------------ zoom-in broker view (queues only)
+  // Left to right: publishers → exchange/topic → the queue itself, oldest message at the head →
+  // consumers, each holding the job it has been handed but not yet acknowledged.
+  _buildQueueRig() {
+    const g = new THREE.Group();
+    const std = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.3, ...extra });
+    const lit = (color = FLOW.job) => new THREE.MeshStandardMaterial({ color: 0x15171a, emissive: color, emissiveIntensity: 1.2 });
+    const mesh = (geo, mat, x, y, z) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, y, z);
+      g.add(m);
+      return m;
+    };
+    mesh(new THREE.BoxGeometry(6.4, 0.08, 1.7), std(0x16181c), 0, 0.14, 0);
+    // the queue: a glass lane, head (next to be delivered) on the right
+    mesh(new THREE.BoxGeometry(3.4, 0.36, 0.56), new THREE.MeshStandardMaterial({ color: 0x8aa0b8, transparent: true, opacity: 0.14, depthWrite: false }), 0, 0.37, 0);
+    mesh(new THREE.BoxGeometry(0.04, 0.5, 0.7), std(0x8a8a84), 1.72, 0.43, 0); // head gate
+    const msgGeo = new THREE.BoxGeometry(0.075, 0.24, 0.4);
+    this.qMsgs = [];
+    for (let i = 0; i < Q_SLOTS; i++) this.qMsgs.push(mesh(msgGeo, lit(), 0, 0.33, 0));
+    // exchange / topic: where publishers hand messages to the broker
+    this.qEntry = mesh(new THREE.OctahedronGeometry(0.27), lit(FLOW.request), -2.55, 0.52, 0);
+    // messages being published, delivered, and (when the queue is full) thrown away
+    const dot = new THREE.BoxGeometry(0.09, 0.09, 0.09);
+    this.qIn = [0, 1, 2, 3].map(() => mesh(dot, lit(), 0, 0.33, 0));
+    this.qOut = [0, 1, 2].map(() => mesh(dot, lit(), 0, 0.33, 0));
+    this.qLost = [0, 1, 2, 3].map(() => mesh(dot, lit(FLOW.error), 0, 0.33, 0));
+    // consumers: each worker machine is a chassis running several consumer processes,
+    // and each process holds the job it has been handed
+    this.qMachines = [];
+    const padGeo = new THREE.BoxGeometry(0.17, 0.05, 0.17);
+    const jobGeo = new THREE.BoxGeometry(0.11, 0.11, 0.11);
+    for (let i = 0; i < 6; i++) {
+      const x = 2.3 + (i % 2) * 0.52;
+      const z = (Math.floor(i / 2) - 1) * 0.52;
+      const box = mesh(new THREE.BoxGeometry(0.46, 0.08, 0.46), std(0x2a2f38), x, 0.2, z);
+      const slots = [];
+      for (let s = 0; s < 4; s++) {
+        const sx = x + ((s % 2) - 0.5) * 0.21;
+        const sz = z + (Math.floor(s / 2) - 0.5) * 0.21;
+        slots.push({ pad: mesh(padGeo, lit(STATUS.good), sx, 0.26, sz), job: mesh(jobGeo, lit(), sx, 0.36, sz) });
+      }
+      this.qMachines.push({ box, slots });
+    }
+    this.qPhase = { in: 0, out: 0, lost: 0 };
+
+    const anchors = {
+      pub: new THREE.Vector3(-2.3, 0.2, 1.25),
+      queue: new THREE.Vector3(0, 0.9, -0.7),
+      cons: new THREE.Vector3(2.0, 0.2, 1.25),
+      lost: new THREE.Vector3(-0.3, 0.2, 1.7),
+    };
+    this.qLabels = this._addAppRig('queue', g, anchors, (n, dt) => this._updateQueueRig(n, dt), (key, n) => key === 'lost' && !(n.dropRate > 0.5 && !n.down));
+    this.qLabels.lost.classList.add('bad');
+  }
+
+  // Register an application view: its meshes, where its labels sit, how it animates, and which labels to hide.
+  _addAppRig(type, group, anchors, update, hide = () => false) {
+    group.visible = false;
+    this.scene.add(group);
+    const labels = {};
+    for (const key in anchors) {
+      const el = document.createElement('div');
+      el.className = 'rig-label';
+      el.innerHTML = '<span></span><b></b>';
+      el.hidden = true;
+      this.labelLayer.appendChild(el);
+      labels[key] = el;
+    }
+    this.appRigs[type] = { group, anchors, labels, update, hide };
+    return labels;
+  }
+
+  // Switch every component between its application view and the hardware rig.
+  setView(view) {
+    this.view = view;
+    if (this.focusId) this.focus(this.focusId);
+  }
+
+  // ------------------------------------------------------------ zoom-in function view
+  // Event sources on the left; on the right the pool of execution environments the platform
+  // manages for you: busy with an event, idle but warm, or being cold-started.
+  _buildFnRig() {
+    const g = new THREE.Group();
+    const std = (color) => new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.3 });
+    const lit = (color) => new THREE.MeshStandardMaterial({ color: 0x15171a, emissive: color, emissiveIntensity: 0.3 });
+    const mesh = (geo, mat, x, y, z) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, y, z);
+      g.add(m);
+      return m;
+    };
+    mesh(new THREE.BoxGeometry(6.6, 0.08, 3.0), std(0x16181c), 0, 0.14, 0);
+    // triggers: a bucket (upload events) and a queue lane (polling for jobs)
+    this.fnBucket = mesh(new THREE.CylinderGeometry(0.34, 0.26, 0.4, 6), lit(FLOW.asset), -2.7, 0.4, -0.75);
+    this.fnQueue = mesh(new THREE.BoxGeometry(0.8, 0.22, 0.3), lit(FLOW.job), -2.7, 0.3, 0.75);
+    const dot = new THREE.BoxGeometry(0.09, 0.09, 0.09);
+    this.fnUpDots = [0, 1, 2].map(() => mesh(dot, lit(FLOW.asset), 0, 0.35, -0.75));
+    this.fnJobDots = [0, 1, 2].map(() => mesh(dot, lit(FLOW.job), 0, 0.35, 0.75));
+    // execution environments: a pad each, with the event it is handling on top
+    this.fnEnvs = [];
+    const padGeo = new THREE.BoxGeometry(0.3, 0.06, 0.3);
+    const runGeo = new THREE.BoxGeometry(0.17, 0.17, 0.17);
+    for (let i = 0; i < FN_TILES; i++) {
+      const x = -1.2 + (i % 10) * 0.42;
+      const z = (Math.floor(i / 10) - 1.5) * 0.46;
+      this.fnEnvs.push({ pad: mesh(padGeo, lit(STATUS.good), x, 0.2, z), run: mesh(runGeo, lit(FLOW.job), x, 0.36, z) });
+    }
+    this.fnPhase = { up: 0, job: 0 };
+    const anchors = {
+      up: new THREE.Vector3(-2.5, 0.5, -1.6),
+      envs: new THREE.Vector3(1.0, 0.5, -1.6),
+      poll: new THREE.Vector3(-2.5, 0.2, 1.75),
+      cold: new THREE.Vector3(0.6, 0.2, 1.75),
+      thr: new THREE.Vector3(2.9, 0.2, 1.75),
+    };
+    const sim = this.sim;
+    this.fnLabels = this._addAppRig('fn', g, anchors, (n, dt) => this._updateFnRig(n, dt), (key, n) => (key === 'thr' && !(n.dropRate > 0.5)) || (key === 'poll' && !sim.edges.has('queue>fn')));
+    this.fnLabels.thr.classList.add('bad');
+  }
+
+  _updateFnRig(node, dt) {
+    const sim = this.sim;
+    const t = sim.time;
+    const live = !node.down;
+    const ph = this.fnPhase;
+    const rate = (r) => (r > 0.01 ? 0.3 + Math.min(2.2, Math.log10(1 + r) * 0.8) : 0);
+    ph.up = (ph.up + dt * rate(node.upRate)) % 1;
+    ph.job = (ph.job + dt * rate(node.jobRate)) % 1;
+    const s3 = sim.edges.has('blob>fn');
+    const poll = sim.edges.has('queue>fn');
+    this.fnBucket.material.emissiveIntensity = s3 && live ? 1.1 : 0.15;
+    this.fnQueue.material.emissiveIntensity = poll && live ? 1.1 : 0.15;
+    this.fnUpDots.forEach((m, i) => {
+      m.visible = live && node.upRate > 0.01 && i < 1 + Math.floor(Math.log10(1 + node.upRate) * 1.5);
+      m.position.x = -2.3 + ((ph.up + i / 3) % 1) * 0.9;
+    });
+    this.fnJobDots.forEach((m, i) => {
+      m.visible = live && node.jobRate > 0.01 && i < 1 + Math.floor(Math.log10(1 + node.jobRate));
+      m.position.x = -2.2 + ((ph.job + i / 3) % 1) * 0.8;
+    });
+    // one tile stands for several environments once there are more than fit
+    const per = node.warm <= FN_TILES ? 1 : node.warm <= FN_TILES * 5 ? 5 : 25;
+    const busy = live ? node.concurrency / per : 0;
+    const warm = live ? Math.ceil(node.warm / per - 0.02) : 0;
+    const cold = Math.ceil(busy * node.coldPct); // the newest busy ones are still starting
+    this.fnEnvs.forEach(({ pad, run }, i) => {
+      const load = THREE.MathUtils.clamp(busy - i, 0, 1);
+      const starting = load > 0.05 && i >= Math.ceil(busy) - cold;
+      pad.material.emissive.set(i < warm ? (starting ? FLOW.request : STATUS.good) : STATUS.down);
+      pad.material.emissiveIntensity = i < warm ? (starting ? 1 + 0.8 * Math.sin(t * 14 + i) : 0.7) : 0.2;
+      run.visible = load > 0.05;
+      run.material.emissive.set(starting ? FLOW.request : FLOW.job);
+      run.material.emissiveIntensity = load * (1.3 + 0.4 * Math.sin(t * 8 + i * 1.7));
+      run.rotation.y = t * 2 + i;
+    });
+
+    const set = (key, name, text) => {
+      this.fnLabels[key].firstChild.textContent = name;
+      this.fnLabels[key].lastChild.textContent = text;
+    };
+    const n1 = (v) => (v < 10 ? v.toFixed(1) : Math.round(v).toLocaleString());
+    set('up', 'Upload events', s3 ? `${n1(node.upRate)} /s` : 'not connected');
+    set('poll', 'Queue polling', `${fmtRate(node.jobRate)} jobs/s`);
+    set('envs', 'Execution environments', `${n1(node.concurrency)} busy · ${n1(node.warm)} warm · limit ${node.limit.toLocaleString()}` + (per > 1 ? ` · 1 tile = ${per}` : ''));
+    set('cold', 'Cold starts', `${Math.round(node.coldPct * 100)}% of events · ${Math.round(node.latency * 1000)} ms avg run`);
+    set('thr', 'Throttled (429)', `${fmtRate(node.dropRate)} events/s`);
+  }
+
+  // ------------------------------------------------------------ zoom-in database view
+  // Left to right: client connections → an index lookup per table → the table's rows on disk,
+  // with the buffer pool (pages held in RAM) behind and the write-ahead log every write goes through.
+  _buildDbRig() {
+    const g = new THREE.Group();
+    const std = (color, extra = {}) => new THREE.MeshStandardMaterial({ color, roughness: 0.6, metalness: 0.3, ...extra });
+    const lit = (color) => new THREE.MeshStandardMaterial({ color: 0x15171a, emissive: color, emissiveIntensity: 0.25 });
+    const mesh = (geo, mat, x, y, z) => {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(x, y, z);
+      g.add(m);
+      return m;
+    };
+    mesh(new THREE.BoxGeometry(6.6, 0.08, 3.9), std(0x16181c), 0, 0.14, 0);
+    const Y = 0.2;
+    // connection pool: one pad per slice of the connection limit
+    this.dbConns = [];
+    const pad = new THREE.BoxGeometry(0.2, 0.06, 0.2);
+    for (let i = 0; i < 16; i++) this.dbConns.push(mesh(pad, lit(FLOW.request), -2.95 + (i % 2) * 0.28, Y, -0.55 + Math.floor(i / 2) * 0.3));
+    // three tables, each an index tree (root → branches → leaves) pointing into rows on disk
+    const nodeGeo = new THREE.BoxGeometry(0.2, 0.1, 0.2);
+    const rowGeo = new THREE.BoxGeometry(1.5, 0.05, 0.62);
+    const link = std(0x3a3f48);
+    this.dbTables = [];
+    for (let k = 0; k < 3; k++) {
+      const z0 = -0.5 + k * 1.05;
+      const tree = [mesh(nodeGeo, lit(FLOW.read), -1.95, Y + 0.02, z0)];
+      for (let b = 0; b < 2; b++) tree.push(mesh(nodeGeo, lit(FLOW.read), -1.45, Y + 0.02, z0 + (b - 0.5) * 0.42));
+      for (let l = 0; l < 4; l++) tree.push(mesh(nodeGeo, lit(FLOW.read), -0.95, Y + 0.02, z0 + (l - 1.5) * 0.21));
+      mesh(new THREE.BoxGeometry(1.0, 0.02, 0.03), link, -1.45, Y - 0.02, z0);
+      mesh(new THREE.BoxGeometry(0.03, 0.02, 0.63), link, -0.95, Y - 0.02, z0);
+      mesh(new THREE.BoxGeometry(0.03, 0.02, 0.42), link, -1.45, Y - 0.02, z0);
+      mesh(new THREE.BoxGeometry(0.5, 0.02, 0.03), link, -0.6, Y - 0.02, z0); // leaf → row
+      const rows = [];
+      for (let r = 0; r < 8; r++) rows.push(mesh(rowGeo, lit(0x8aa0b8), 0.45, Y + 0.01 + r * 0.065, z0));
+      this.dbTables.push({ tree, rows });
+    }
+    // buffer pool: pages of the tables held in memory
+    this.dbPages = [];
+    const page = new THREE.BoxGeometry(0.17, 0.05, 0.3);
+    for (let i = 0; i < 16; i++) this.dbPages.push(mesh(page, lit(FLOW.read), -1.95 + i * 0.21, Y, -1.5));
+    // write-ahead log: an append-only strip; the bright segment is the write position
+    this.dbLog = [];
+    const seg = new THREE.BoxGeometry(0.34, 0.06, 0.2);
+    for (let i = 0; i < 12; i++) this.dbLog.push(mesh(seg, lit(FLOW.write), 2.05, Y, -1.5 + i * 0.25));
+    // replicas replaying that log
+    this.dbReplicas = [];
+    for (let i = 0; i < 5; i++) this.dbReplicas.push(mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.22, 16), lit(FLOW.write), 2.85, Y + 0.08, -1.2 + i * 0.5));
+    this.dbPhase = { read: 0, write: 0 };
+
+    const anchors = {
+      conns: new THREE.Vector3(-4.3, 0.2, 0.4),
+      index: new THREE.Vector3(-2.3, 0.2, 2.2),
+      table: new THREE.Vector3(1.2, 0.2, 2.2),
+      pool: new THREE.Vector3(-1.3, 0.5, -2.0),
+      log: new THREE.Vector3(2.2, 0.5, -2.0),
+    };
+    this.dbLabels = this._addAppRig('db', g, anchors, (n, dt) => this._updateDbRig(n, dt));
+  }
+
+  _updateDbRig(node, dt) {
+    const sim = this.sim;
+    const terms = DB_TERMS[sim.params.tech.db] || BTREE;
+    const eng = node.tech;
+    const ph = this.dbPhase;
+    const live = !node.down;
+    const rate = (r) => (r > 0.05 ? 0.6 + Math.min(5, Math.log10(1 + r) * 1.6) : 0); // lookups shown per second
+    ph.read += dt * rate(live ? node.readRate : 0);
+    ph.write += dt * rate(live ? node.writeRate : 0);
+    const rnd = (n, salt) => Math.abs(Math.sin(n * 12.9898 + salt * 78.233) * 43758.5453) % 1; // stable per lookup
+
+    const open = live ? Math.round(node.conns * 16) : 0;
+    const busy = loadLevel(node.conns, false);
+    this.dbConns.forEach((c, i) => {
+      c.material.emissive.set(i < open ? (busy === 'good' ? FLOW.request : STATUS[busy]) : STATUS.down);
+      c.material.emissiveIntensity = i < open ? 1.3 : 0.25;
+    });
+
+    // rows on disk: how full the volume is, or a slow log scale where storage has no fixed size
+    const fill = eng.managedDisk ? THREE.MathUtils.clamp(Math.log10(1 + (node.storedGB || 0)) / 4, 0.1, 1) : node.diskUsed;
+    const nRows = Math.max(1, Math.ceil(fill * 8));
+    // one read walks root → branch → leaf → row; one write lands on a row and its index leaf
+    const rk = Math.floor(ph.read);
+    const rf = ph.read - rk;
+    const rT = Math.floor(rnd(rk, 1) * 3);
+    const rLeaf = Math.floor(rnd(rk, 2) * 4);
+    const rRow = Math.floor(rnd(rk, 3) * nRows);
+    const wk = Math.floor(ph.write);
+    const wf = ph.write - wk;
+    const wT = Math.floor(rnd(wk, 4) * 3);
+    const wLeaf = Math.floor(rnd(wk, 5) * 4);
+    const wRow = node.readOnly ? -1 : nRows - 1 - Math.floor(rnd(wk, 6) * Math.min(2, nRows));
+    const reading = live && node.readRate > 0.05;
+    const writing = live && node.writeRate > 0.05 && !node.readOnly;
+    this.dbTables.forEach(({ tree, rows }, k) => {
+      tree.forEach((m, i) => {
+        const depth = i === 0 ? 0 : i < 3 ? 1 : 2;
+        const onPath = i === 0 || (i < 3 ? i - 1 === Math.floor(rLeaf / 2) : i - 3 === rLeaf);
+        const hot = reading && k === rT && onPath && rf * 4 >= depth;
+        const upd = writing && k === wT && i - 3 === wLeaf && wf > 0.5;
+        m.material.emissive.set(upd ? FLOW.write : FLOW.read);
+        m.material.emissiveIntensity = upd ? 2 : hot ? 2 : 0.3;
+      });
+      rows.forEach((m, r) => {
+        m.visible = r < nRows;
+        const hot = reading && k === rT && r === rRow && rf > 0.75;
+        const upd = writing && k === wT && r === wRow;
+        m.material.emissive.set(upd ? FLOW.write : hot ? FLOW.read : node.readOnly ? STATUS.critical : 0x8aa0b8);
+        m.material.emissiveIntensity = upd ? 2.2 * (1 - wf) + 0.4 : hot ? 2 : node.readOnly ? 0.7 : 0.3;
+      });
+    });
+
+    const warm = live ? Math.round(node.mem * 16) : 0;
+    this.dbPages.forEach((m, i) => {
+      const touched = reading && i === Math.floor(rnd(rk, 7) * Math.max(1, warm));
+      m.material.emissive.set(STATUS[loadLevel(node.mem, false)]);
+      m.material.emissiveIntensity = i < warm ? (touched ? 2 : 0.8) : 0.12;
+    });
+    const head = wk % 12;
+    this.dbLog.forEach((m, i) => {
+      const age = (head - i + 12) % 12; // segments fade the longer ago they were written
+      m.material.emissiveIntensity = writing ? (age === 0 ? 2.2 : Math.max(0.2, 1 - age * 0.12)) : 0.15;
+    });
+    const R = node.replicas || 0;
+    const lagging = node.replLag > 1;
+    this.dbReplicas.forEach((m, i) => {
+      m.visible = i < R;
+      const up = i < (node.replicasUp ?? R);
+      m.material.emissive.set(!up ? STATUS.down : lagging ? STATUS.warning : FLOW.write);
+      m.material.emissiveIntensity = up ? (writing ? 0.8 + 0.6 * Math.sin(sim.time * 6 - i) : 0.5) : 0.3;
+    });
+
+    const set = (key, name, text) => {
+      this.dbLabels[key].firstChild.textContent = name;
+      this.dbLabels[key].lastChild.textContent = text;
+    };
+    const waiting = node.queue > 5 ? ` · ${Math.round(node.queue).toLocaleString()} queries waiting` : '';
+    set('conns', 'Connections', (node.maxConns ? `${Math.round(node.conns * node.maxConns)} of ${node.maxConns}` : 'stateless API') + waiting);
+    set('index', terms.index, `${fmtRate(node.readRate)} lookups/s · ${(node.latency * 1000).toFixed(node.latency < 0.1 ? 1 : 0)} ms`);
+    const shards = node.shards > 1 ? ` · 1 of ${node.shards} shards` : '';
+    set('table', terms.table, (node.readOnly ? 'DISK FULL · read-only' : eng.managedDisk ? `${fmtGB(node.storedGB || 0)} · grows on demand` : `${fmtGB(node.storedGB || 0)} · disk ${Math.round(node.diskUsed * 100)}% full`) + shards);
+    set('pool', terms.pool, `${Math.round(node.mem * 100)}% of RAM`);
+    const repl = R ? ` → ${node.replicasUp ?? R} replica${R > 1 ? 's' : ''} ${node.replLag < 10 ? (node.replLag || 0).toFixed(2) : Math.round(node.replLag)}s behind` : '';
+    set('log', terms.log, `${fmtRate(node.writeRate)} writes/s` + repl);
+  }
+
+  _updateQueueRig(node, dt) {
+    const sim = this.sim;
+    const t = sim.time;
+    const terms = QUEUE_TERMS[sim.params.tech.queue] || QUEUE_TERMS.rabbitmq;
+    const ph = this.qPhase;
+    const live = !node.down;
+    // √ scale so a short backlog is visible; a bottomless managed queue barely shows one
+    const shown = !live || node.queue < 1 ? 0 : THREE.MathUtils.clamp(Math.ceil(Q_SLOTS * Math.sqrt(node.queue / node.qmax)), 1, Q_SLOTS);
+    const full = shown === Q_SLOTS && node.util >= 0.99;
+    const rate = (r) => (r > 0.05 ? 0.25 + Math.min(2.2, Math.log10(1 + r) * 0.7) : 0); // animation speed for a flow
+    ph.in = (ph.in + dt * rate(node.inRate)) % 1;
+    ph.out = (ph.out + dt * rate(node.outRate)) % 1;
+    ph.lost = (ph.lost + dt * 1.1) % 1;
+    const HEAD = 1.64;
+    const STEP = 3.28 / Q_SLOTS;
+    const tail = HEAD - shown * STEP;
+    const col = node.util >= 0.85 ? STATUS.critical : node.util >= 0.6 ? STATUS.warning : FLOW.job;
+    // the backlog marches toward the head as consumers take messages off it
+    const march = node.outRate > 0.05 && shown < Q_SLOTS ? ph.out : 0;
+    this.qMsgs.forEach((m, i) => {
+      m.visible = i < shown;
+      m.position.x = HEAD - (i + 1 - march) * STEP + STEP / 2;
+      m.material.emissive.set(col);
+      m.material.emissiveIntensity = i === 0 ? 1.9 : 1.1; // the head is the next one out
+    });
+    const hasEntry = !!terms.entry;
+    this.qEntry.visible = hasEntry;
+    this.qEntry.rotation.y = t * 1.5;
+    const from = hasEntry ? -2.55 : -3.05;
+    const nIn = live && node.inRate > 0.05 ? Math.min(4, 1 + Math.floor(Math.log10(1 + node.inRate))) : 0;
+    this.qIn.forEach((m, i) => {
+      m.visible = i < nIn && !full;
+      const f = (ph.in + i / 4) % 1;
+      m.position.x = from + (tail - from) * f;
+    });
+    const busy = Math.min(node.consumers, node.inflight);
+    const nOut = live && node.outRate > 0.05 ? Math.min(3, 1 + Math.floor(Math.log10(1 + node.outRate))) : 0;
+    this.qOut.forEach((m, i) => {
+      m.visible = i < nOut;
+      const f = (ph.out + i / 3) % 1;
+      m.position.x = 1.72 + f * 0.5;
+    });
+    // a full queue has nowhere to put new messages: they fall off the tail
+    this.qLost.forEach((m, i) => {
+      m.visible = live && node.dropRate > 0.5;
+      const f = (ph.lost + i / 4) % 1;
+      m.position.set(-1.75 - f * 0.25, 0.5 - f * f * 0.34, f * 1.0);
+    });
+    const M = sim.params.workerCount;
+    this.qMachines.forEach(({ box, slots }, i) => {
+      box.visible = i < M;
+      const on = i < node.machines;
+      slots.forEach(({ pad, job }, s) => {
+        pad.visible = box.visible;
+        pad.material.emissive.set(on ? STATUS.good : STATUS.down);
+        pad.material.emissiveIntensity = on ? 0.9 : 0.4;
+        // the broker deals jobs out round-robin, so every machine fills at the same pace
+        const load = THREE.MathUtils.clamp(busy - (s * M + i), 0, 1);
+        job.visible = box.visible && on && load > 0.05;
+        job.material.emissiveIntensity = load * (1.2 + 0.5 * Math.sin(t * 9 + i * 1.3 + s));
+        job.rotation.y = t * 2 + i + s;
+      });
+    });
+
+    const set = (key, name, text) => {
+      this.qLabels[key].firstChild.textContent = name;
+      this.qLabels[key].lastChild.textContent = text;
+    };
+    set('pub', hasEntry ? `${terms.entry} · published` : 'Published', `${fmtRate(node.inRate)} jobs/s`);
+    const wait = !node.consumers ? 'no consumer' : node.latency < 0.05 ? 'no wait' : `oldest waits ${node.latency < 90 ? node.latency.toFixed(1) + 's' : Math.round(node.latency / 60) + ' min'}`;
+    set('queue', `${terms.queue} · ${terms.ready}`, `${Math.round(node.queue).toLocaleString()} of ${fmtRate(node.qmax)} · ${wait}`);
+    set('cons', terms.flight, node.consumers ? `${busy.toFixed(1)} · ${node.consumers} consumers on ${node.machines} machine${node.machines > 1 ? 's' : ''} · ${fmtRate(node.outRate)} ${terms.done}/s` + (node.fnJobs > 0.05 ? ` · functions take ${fmtRate(node.fnJobs)}/s more` : '') : node.fnJobs > 0.05 ? `functions only · ${fmtRate(node.fnJobs)} jobs/s` : 'no consumers connected');
+    set('lost', 'Queue full · rejected', `${fmtRate(node.dropRate)} jobs/s`);
   }
 
   _updateRig(node, dt) {
@@ -595,7 +1028,11 @@ export class Scene {
       return;
     }
     const p = this.nodes[id].target;
-    this.tween = { pos: new THREE.Vector3(p.x + 0.3, 7, p.z + 3.2), target: new THREE.Vector3(p.x, 0.4, p.z) };
+    // application views are wider than the motherboard, so stand further back
+    const wide = this.view === 'app' && this.appRigs[this.nodes[id].type];
+    this.tween = wide
+      ? { pos: new THREE.Vector3(p.x + 0.2, 7.6, p.z + 3.5), target: new THREE.Vector3(p.x, 0.3, p.z + 0.1) }
+      : { pos: new THREE.Vector3(p.x + 0.3, 7, p.z + 3.2), target: new THREE.Vector3(p.x, 0.4, p.z) };
   }
 
   _overviewPos() {
@@ -816,8 +1253,13 @@ export class Scene {
 
     // hardware rig for the focused node
     const fnode = this.focusId && sim.nodes[this.focusId];
-    this.rig.visible = !!fnode;
-    if (fnode) {
+    const app = (fnode && this.view === 'app' && this.appRigs[fnode.type]) || null;
+    this.rig.visible = !!fnode && !app;
+    for (const type in this.appRigs) this.appRigs[type].group.visible = this.appRigs[type] === app;
+    if (app) {
+      app.group.position.copy(this.nodes[this.focusId].group.position);
+      app.update(fnode, dt);
+    } else if (fnode) {
       this.rig.position.copy(this.nodes[this.focusId].group.position);
       this._updateRig(fnode, dt);
     }
@@ -846,8 +1288,16 @@ export class Scene {
     }
     for (const key in this.rigLabels) {
       const el = this.rigLabels[key];
-      el.hidden = !fnode;
+      el.hidden = !this.rig.visible;
       if (fnode) this._project(null, el, tmpS.copy(this.rigAnchors[key]).add(this.rig.position));
+    }
+    for (const type in this.appRigs) {
+      const r = this.appRigs[type];
+      for (const key in r.labels) {
+        const el = r.labels[key];
+        el.hidden = r !== app || r.hide(key, fnode);
+        if (!el.hidden) this._project(null, el, tmpS.copy(r.anchors[key]).add(r.group.position));
+      }
     }
     this.camera.position.x -= sx;
     this.camera.position.y -= sy;
@@ -869,6 +1319,7 @@ export class Scene {
       else if (n.type === 'kafka') stat = `${fmtRate(n.inRate)} msg/s · lag ${fmtRate(Math.max(n.lag, n.lagCH))}`;
       else if (n.type === 'lake') stat = `${fmtGB(n.storedGB)} · ${n.files.toLocaleString()} files`;
       else if (n.type === 'cdn') stat = `${fmtRate(n.inRate)} obj/s · ${Math.round(n.hit * 100)}% edge hits`;
+      else if (n.type === 'fn') stat = `${fmtRate(n.outRate)} invocations/s · ${n.concurrency.toFixed(n.concurrency < 10 ? 1 : 0)} concurrent`;
       else if (n.type === 'blob') stat = `${fmtGB(n.storedGB)} · ${fmtRate(n.outRate)} GET/s`;
       else if (n.type === 'clickhouse') stat = `OLAP · ${fmtRate(n.insertRate)} rows/s · ${fmtRate(n.outRate)} q/s`;
       else if (n.type === 'trino' || n.type === 'bi') stat = `${n.outRate.toFixed(1)} queries/s`;

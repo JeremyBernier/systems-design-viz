@@ -48,6 +48,7 @@ const ui = new UI(sim, {
   onPause: () => (paused = !paused),
   onPreset: applyPreset,
   onStartPlace: (id) => scene.startPlacing(id),
+  onView: (view) => scene.setView(view),
   onConnectMode: (on) => {
     scene.placing = null;
     scene.setConnecting(on);

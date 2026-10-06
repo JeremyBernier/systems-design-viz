@@ -4,6 +4,7 @@ import { PRESETS } from './presets.js';
 import { costs, nodeCost, fmtUSD } from './cost.js';
 import { loadLevel, APP_VIEW } from './scene.js';
 import { initModelUI, pricingHTML, syncPricing } from './modelui.js';
+import { initDbGuide } from './dbguide.js';
 import { DATA_STEP, MAX_REPLICAS, SHARD_STEPS, MAX_CACHE_NODES, CACHE_NODE_CAP } from './datatier.js';
 import { fmtTTL } from './cdn.js';
 import { RETRY_POLICIES, SLO_TARGETS } from './latency.js';
@@ -280,6 +281,7 @@ export class UI {
     this.syncControls();
     // --- model your own system: workload assumptions, pricing model, capacity planner (modelui.js)
     initModelUI(this, sim);
+    initDbGuide(this, sim);
 
     $('detail').addEventListener('click', (e) => {
       const row = e.target.closest('.cost-row[data-id]');
@@ -629,7 +631,7 @@ export class UI {
         node.tech
           ? `<h2>What is ${node.tech.name}?</h2><p class="d-about">${node.tech.about}</p>${
               node.tech.about !== info.about ? `<h2>Its role here: ${info.title}</h2><p class="d-about">${info.about}</p>` : ''
-            }`
+            }` + (node.type === 'db' || node.type === 'clickhouse' ? `<button id="d-guide" class="wide" data-type="${node.type}">📖 Compare databases and their tradeoffs</button>` : '')
           : `<h2>What it is</h2><p class="d-about">${info.about}</p>`
       }
       <h2>Right now</h2>

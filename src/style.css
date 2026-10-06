@@ -799,7 +799,8 @@ select {
   border-radius: 6px;
   padding: 3px 6px;
 }
-#planner {
+#planner,
+#dbguide {
   width: min(940px, calc(100vw - 32px));
   max-height: min(820px, calc(100vh - 32px));
   padding: 0;
@@ -809,18 +810,22 @@ select {
   border-radius: 10px;
   overflow: hidden;
 }
-#planner[open] {
+#planner[open],
+#dbguide[open] {
   display: flex;
   flex-direction: column;
 }
-#planner::backdrop {
+#planner::backdrop,
+#dbguide::backdrop {
   background: rgb(0 0 0 / 0.6);
 }
-#planner h3 {
+#planner h3,
+#dbguide h3 {
   margin: 0;
   font-size: 15px;
 }
-#planner h2 {
+#planner h2,
+#dbguide h2 {
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.06em;
@@ -828,7 +833,8 @@ select {
   color: var(--muted);
   margin: 16px 0 6px;
 }
-#planner h2:first-child {
+#planner h2:first-child,
+#dbguide h2:first-child {
   margin-top: 0;
 }
 .pl-head,
@@ -1019,4 +1025,114 @@ button.primary {
 .zoom-btn:hover {
   filter: brightness(1.15);
   border-color: #fff;
+}
+
+/* ---------- database guide dialog (dbguide.js); the frame is shared with #planner ---------- */
+#dbguide {
+  width: min(1080px, calc(100vw - 32px));
+}
+.dg-tabs {
+  margin: 12px 16px 0;
+}
+.dg-body {
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  padding: 14px 16px 18px;
+}
+.dg-body section + section {
+  margin-top: 22px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+.dg-body .d-about {
+  max-width: 78ch;
+}
+.dg-pick,
+.dg-try {
+  max-width: 78ch;
+  margin: 8px 0;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border-left: 3px solid var(--accent);
+  color: var(--text-2);
+}
+.dg-pick b,
+.dg-try b {
+  color: var(--text);
+}
+.dg-scroll {
+  overflow-x: auto;
+}
+.dg-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.dg-table th,
+.dg-table td {
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+  border-top: 1px solid var(--line);
+  color: var(--text-2);
+}
+.dg-table thead th {
+  border-top: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.dg-table tbody th {
+  width: 150px;
+  font-weight: 400;
+}
+.dg-table td:last-child {
+  width: 215px;
+  font-variant-numeric: tabular-nums;
+}
+.dg-table tr.on {
+  background: rgb(57 135 229 / 0.1);
+}
+.dg-table ul {
+  margin: 0;
+  padding-left: 14px;
+}
+.dg-eng {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-weight: 600;
+}
+.dg-eng small {
+  display: block;
+  font-weight: 400;
+  color: var(--muted);
+}
+.dg-table em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--accent);
+}
+.dg-table button {
+  padding: 2px 10px;
+  font-size: 11px;
+}
+.dg-q {
+  max-width: 78ch;
+  margin: 8px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.dg-q summary {
+  cursor: pointer;
+  color: var(--text);
+}
+.dg-q[open] summary {
+  margin-bottom: 8px;
 }

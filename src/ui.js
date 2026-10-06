@@ -7,6 +7,7 @@ import { initModelUI, pricingHTML, syncPricing } from './modelui.js';
 import { initDbGuide } from './dbguide.js';
 import { initNumbers } from './numbers.js';
 import { initCompareUI, tradeHTML } from './compareui.js';
+import { initBuildUI } from './buildui.js';
 import { DATA_STEP, MAX_REPLICAS, SHARD_STEPS, MAX_CACHE_NODES, CACHE_NODE_CAP } from './datatier.js';
 import { fmtTTL } from './cdn.js';
 import { RETRY_POLICIES, SLO_TARGETS } from './latency.js';
@@ -293,6 +294,7 @@ export class UI {
     initModelUI(this, sim);
     initDbGuide(this, sim);
     initNumbers(sim);
+    initBuildUI(this, sim); // the Build button, component picker and placing hint (buildui.js)
     initCompareUI(this, sim); // trade-offs and the side-by-side technology comparison (compareui.js)
 
     $('detail').addEventListener('click', (e) => {
@@ -464,11 +466,11 @@ export class UI {
     $('connect').textContent = mode === 'connect' ? 'Done connecting' : 'Connect components';
     $('build-hint').textContent =
       mode === 'place'
-        ? `Click the floor to place the ${NODE_INFO[this.sim.nodes[placingId].type].title}. It starts with no connections. Esc cancels.`
+        ? `Move the pointer to where the ${NODE_INFO[this.sim.nodes[placingId].type].title} should go and click to build it. It starts with no connections. Esc cancels.`
         : mode === 'connect'
           ? 'Click one component, then another. Sensible pairs are connected (or disconnected if already wired).'
-          : 'Drag any component to move it. Click one to inspect, rewire or remove it.';
-    for (const b of $('palette').children) b.setAttribute('aria-pressed', b.dataset.id === this.placingId);
+          : 'Press Build (or B) to add a component. Drag any component to move it; click one to inspect, rewire or remove it.';
+    if (this.onMode) this.onMode(); // buildui.js mirrors the mode on its button and pointer hint
     if (mode === 'place') this.onStartPlace(placingId);
     else this.onConnectMode(mode === 'connect');
   }
@@ -569,22 +571,6 @@ export class UI {
     const pos = Math.round((Math.log(Math.max(10, p.schedRate) / 10) / Math.log(1000)) * 100);
     if (document.activeElement !== el && +el.value !== pos) el.value = pos;
     $('v-sched').textContent = Math.round(p.schedRate).toLocaleString();
-  }
-
-  _renderPalette() {
-    const items = this.sim.placeable();
-    const sig = items.map((n) => n.id).join();
-    if (sig === this._paletteSig) return;
-    this._paletteSig = sig;
-    const pal = $('palette');
-    pal.innerHTML = items.length ? '' : '<span class="hint">Every component is in the diagram. Remove one to place it again.</span>';
-    for (const n of items) {
-      const b = document.createElement('button');
-      b.dataset.id = n.id;
-      b.textContent = '+ ' + NODE_INFO[n.type].title;
-      b.addEventListener('click', () => this.setMode(this.placingId === n.id ? null : 'place', n.id));
-      pal.append(b);
-    }
   }
 
   _renderConnections() {
@@ -803,7 +789,6 @@ export class UI {
     const cost = costs(sim);
     $('t-cost').textContent = fmtUSD(cost.total);
     $('t-cpm').textContent = cost.perMillion ? `per month · ${fmtUSD(cost.perMillion)} per 1M requests` : 'per month';
-    this._renderPalette();
     this._syncDelivery();
     this._syncSched();
     this._renderAuto();

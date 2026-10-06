@@ -408,7 +408,7 @@ export class Scene {
       const line = new THREE.Line(geo, mat);
       line.frustumCulled = false;
       this.scene.add(line);
-      this.links.push({ id: `${from}>${to}`, from: this.nodes[from], to: this.nodes[to], color: new THREE.Color(color), line, acc: {} });
+      this.links.push({ id: `${from}>${to}`, a: from, b: to, from: this.nodes[from], to: this.nodes[to], color: new THREE.Color(color), line, acc: {} });
     };
     add('client', 'lb', FLOW.request);
     for (let i = 0; i < MAX_WEB; i++) {
@@ -1129,9 +1129,20 @@ export class Scene {
     for (const id in this.nodes) {
       const v = this.nodes[id];
       const n = sim.nodes[id];
-      v.group.visible = n.active;
+      // the component being placed is shown as a see-through preview riding on the pointer
+      const preview = this.placing === id && !n.active && !!this.cursor;
+      v.group.visible = n.active || preview;
       if (!n.active && n.type === 'web') v.manual = false;
-      v.el.hidden = !v.group.visible;
+      v.el.hidden = !n.active;
+      if (preview) {
+        v.group.position.set(this.cursor.x, 0, this.cursor.z);
+        v.fade = 0.55;
+        for (const m of v.mats) {
+          m.opacity = v.fade;
+          m.depthWrite = false;
+        }
+        continue;
+      }
       if (!v.group.visible) {
         v.group.position.copy(v.target);
         continue;
@@ -1195,7 +1206,7 @@ export class Scene {
     // links + traffic particles
     for (const L of this.links) {
       const rate = sim.flows[L.id] || 0;
-      const show = L.from.group.visible && L.to.group.visible && sim.edges.has(L.id);
+      const show = sim.nodes[L.a].active && sim.nodes[L.b].active && L.from.group.visible && L.to.group.visible && sim.edges.has(L.id); // not to a preview
       L.line.visible = show;
       if (!show) continue;
       const a = L.from.group.position;

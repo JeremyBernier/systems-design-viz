@@ -12,6 +12,7 @@ const PROJECTS = {
   '/night-in-japan': 'night-in-japan.pages.dev',
   '/raccoon-city': 'raccoon-city.pages.dev',
   '/music-viz': 'music-viz.pages.dev',
+  '/worldmaps': 'worldmaps-b5e.pages.dev',
 };
 
 export default {

@@ -13,6 +13,7 @@ const PROJECTS = {
   '/raccoon-city': 'raccoon-city.pages.dev',
   '/music-viz': 'music-viz.pages.dev',
   '/worldmaps': 'worldmaps-b5e.pages.dev',
+  '/daw': 'music-daw.pages.dev',
 };
 
 export default {

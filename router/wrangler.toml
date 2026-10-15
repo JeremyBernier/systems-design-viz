@@ -30,4 +30,8 @@ routes = [
   { pattern = "jbernier.com/worldmaps/*", zone_name = "jbernier.com" },
   { pattern = "www.jbernier.com/worldmaps", zone_name = "jbernier.com" },
   { pattern = "www.jbernier.com/worldmaps/*", zone_name = "jbernier.com" },
+  { pattern = "jbernier.com/daw", zone_name = "jbernier.com" },
+  { pattern = "jbernier.com/daw/*", zone_name = "jbernier.com" },
+  { pattern = "www.jbernier.com/daw", zone_name = "jbernier.com" },
+  { pattern = "www.jbernier.com/daw/*", zone_name = "jbernier.com" },
 ]
